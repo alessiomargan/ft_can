@@ -542,4 +542,4 @@ def update_graph(n, display_window_seconds, smoothing_method, smoothing_window,
 if __name__ == '__main__':
     # Run without debug mode to prevent double-launching (which causes port conflicts)
     print("Starting Dash app without debug mode to prevent port conflicts")
-    app.run_server(debug=False, host='0.0.0.0', port=8050)
+    app.run(debug=False, host='0.0.0.0', port=8050)
