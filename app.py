@@ -90,6 +90,12 @@ sensor_data = {}
 config_publisher = zmq.Context().socket(zmq.PUB)
 config_publisher.bind("tcp://127.0.0.1:10102")  # Use a different port for config
 
+# Define locks and global variables
+csv_log_lock = threading.Lock()
+csv_log_file = 'can_data_log.csv'
+enabled_ids_lock = threading.Lock()
+enabled_ids = set(parse_hex_id(rtr['id']) for rtr in rtr_configs)  # Initialize with all RTR IDs
+
 # Create data buffers with calculated size
 def init_csv_log():
     with csv_log_lock:
