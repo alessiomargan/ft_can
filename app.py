@@ -38,6 +38,8 @@ except Exception as e:
 can_interface = config['can_interface']
 bitrate = config['bitrate']
 rtr_configs = config['rtr_ids']
+bitrate = config['bitrate']
+rtr_configs = config['rtr_ids']
 
 # Buffers for each variable per RTR ID - calculate buffer size based on sampling rate and time window
 SAMPLE_RATE = 20  # Hz (from your RTR configuration)
@@ -101,17 +103,38 @@ def apply_smoothing(x_values, y_values, method, window_size):
 sensor_data = {}
 
 # Setup ZMQ publisher for sending configuration updates
-config_publisher = zmq.Context().socket(zmq.PUB)
-# Set socket options to allow address reuse
-config_publisher.setsockopt(zmq.LINGER, 0)  # Don't keep messages around after socket close
+def setup_config_publisher(max_retries=3, retry_delay=0.5):
+    """Set up the config publisher with retries"""
+    for attempt in range(max_retries):
+        try:
+            context = zmq.Context()
+            config_publisher = context.socket(zmq.PUB)
+            # Set socket options
+            config_publisher.setsockopt(zmq.LINGER, 0)  # Don't keep messages around after socket close
+            config_publisher.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout on receive
+            config_publisher.setsockopt(zmq.SNDTIMEO, 1000)  # 1 second timeout on send
+            
+            config_address = get_config_address()
+            print(f"Attempt {attempt+1}/{max_retries}: Binding config publisher to {config_address}")
+            config_publisher.bind(config_address)
+            print(f"Successfully bound config publisher to {config_address}")
+            return config_publisher
+        except zmq.error.ZMQError as e:
+            print(f"Attempt {attempt+1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print("All binding attempts failed.")
+                raise
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            raise
+
 try:
-    config_address = get_config_address()
-    print(f"Attempting to bind config publisher to {config_address}")
-    config_publisher.bind(config_address)
-    print(f"Config publisher bound to {config_address}")
-except zmq.error.ZMQError as e:
-    print(f"ERROR: Failed to bind config publisher to {config_address}")
-    print(f"Error details: {e}")
+    config_publisher = setup_config_publisher()
+except Exception as e:
+    print(f"ERROR: Could not bind config publisher: {e}")
     print("Please ensure no other instances of the application are running.")
     print("Exiting due to port binding failure.")
     sys.exit(1)
@@ -517,4 +540,6 @@ def update_graph(n, display_window_seconds, smoothing_method, smoothing_window,
     return {'data': traces, 'layout': layout}
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Run without debug mode to prevent double-launching (which causes port conflicts)
+    print("Starting Dash app without debug mode to prevent port conflicts")
+    app.run_server(debug=False, host='0.0.0.0', port=8050)
