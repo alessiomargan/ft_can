@@ -1,5 +1,6 @@
 import asyncio
 import dash
+import sys
 from dash import dcc, html
 from dash.dependencies import Output, Input, State
 import plotly.graph_objs as go
@@ -88,7 +89,16 @@ sensor_data = {}
 
 # Setup ZMQ publisher for sending configuration updates
 config_publisher = zmq.Context().socket(zmq.PUB)
-config_publisher.bind("tcp://127.0.0.1:10102")  # Use a different port for config
+try:
+    config_address = get_config_address()
+    config_publisher.bind(config_address)
+    print(f"Config publisher bound to {config_address}")
+except zmq.error.ZMQError as e:
+    print(f"ERROR: Failed to bind config publisher to {config_address}")
+    print(f"Error details: {e}")
+    print("Please ensure no other instances of the application are running.")
+    print("Exiting due to port binding failure.")
+    sys.exit(1)
 
 # Define locks and global variables
 csv_log_lock = threading.Lock()
@@ -354,12 +364,16 @@ for rtr in rtr_configs:
                 'id': rtr_id,
                 'frequency': frequency
             }
-            # Send the configuration update
-            config_publisher.send_multipart([
-                b"CONFIG", 
-                json.dumps(update_data).encode("utf8")
-            ])
-            print(f"Updated frequency for {rtr_id} to {frequency}Hz")
+            
+            try:
+                # Send the configuration update
+                config_publisher.send_multipart([
+                    b"CONFIG", 
+                    json.dumps(update_data).encode("utf8")
+                ])
+                print(f"Dashboard sent frequency update for {rtr_id} to {frequency}Hz")
+            except Exception as e:
+                print(f"Error sending frequency update: {e}")
         
         # Return False to keep the interval component enabled
         return False

@@ -1,6 +1,11 @@
 can_interface: can0
 bitrate: 500000
 
+# ZMQ Configuration
+zmq:
+  data_port: 10101  # Port for CAN data publishing
+  config_port: 10102  # Port for configuration messages
+
 rtr_ids:
   - id: 0x100
     freq: 20.0  # Frequency in Hz
