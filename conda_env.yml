@@ -1,0 +1,16 @@
+name: ft-can
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pyzmq
+  - pyyaml
+  - numpy
+  - scipy
+  - pandas
+  - pip:
+      - python-can
+      - dash
+      - plotly
+      - more-itertools
