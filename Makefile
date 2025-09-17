@@ -35,13 +35,17 @@ up-conda-env:  ## Update the conda environment with any changes in the yml file
 # Application
 ###################
 
-run: run-pub run-app  ## Run both publisher and dashboard app
+run: kill  ## Run both publisher and dashboard app
+	@echo "Starting CAN system (publisher first, then dashboard)..."
+	$(CONDA_ACTIVATE) && python async_pub.py & \
+	sleep 2 && \
+	python app.py
 
-run-app: kill  ## Run the CAN bus dashboard application
+run-app: kill-app  ## Run the CAN bus dashboard application
 	@echo "Starting CAN bus dashboard application..."
 	$(CONDA_ACTIVATE) && python app.py
 
-run-pub: kill  ## Run the CAN publisher service with RTR handling
+run-pub: kill-pub  ## Run the CAN publisher service with RTR handling
 	@echo "Starting CAN publisher service with RTR handling..."
 	$(CONDA_ACTIVATE) && python async_pub.py
 
@@ -68,9 +72,19 @@ clean:  ## Clean generated files and logs
 	find . -name "__pycache__" -type d -exec rm -rf {} +
 	find . -name "*.pyc" -delete
 
-kill:  ## Kill any running instances of the app
-	@echo "Killing any running instances..."
+kill:  ## Kill all running instances of the app
+	@echo "Killing all running instances..."
 	-pkill -f "python.*async_pub.py" || true
 	-pkill -f "python.*app.py" || true
-	@echo "Done killing processes"
+	@echo "Done killing all processes"
+
+kill-app:  ## Kill only the dashboard app
+	@echo "Killing dashboard app instances..."
+	-pkill -f "python.*app.py" || true
+	@echo "Done killing dashboard processes"
+
+kill-pub:  ## Kill only the publisher
+	@echo "Killing publisher instances..."
+	-pkill -f "python.*async_pub.py" || true
+	@echo "Done killing publisher processes"
 
