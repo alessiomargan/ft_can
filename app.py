@@ -17,10 +17,23 @@ from scipy import signal
 import pandas as pd
 
 # Import utilities
-from utils import get_address, load_config, parse_hex_id
+from utils import get_address, get_config_address, load_config, parse_hex_id
 
 # Load configuration
 config = load_config()
+
+# Force ZMQ socket cleanup for the config port
+try:
+    config_address = get_config_address()
+    port = int(config_address.split(':')[-1])
+    context = zmq.Context()
+    socket = context.socket(zmq.PUB)
+    socket.setsockopt(zmq.LINGER, 0)
+    socket.close()
+    context.term()
+    print(f"Cleaned up any lingering ZMQ sockets on port {port}")
+except Exception as e:
+    print(f"Note: ZMQ socket cleanup attempt: {e}")
 
 can_interface = config['can_interface']
 bitrate = config['bitrate']
@@ -89,8 +102,11 @@ sensor_data = {}
 
 # Setup ZMQ publisher for sending configuration updates
 config_publisher = zmq.Context().socket(zmq.PUB)
+# Set socket options to allow address reuse
+config_publisher.setsockopt(zmq.LINGER, 0)  # Don't keep messages around after socket close
 try:
     config_address = get_config_address()
+    print(f"Attempting to bind config publisher to {config_address}")
     config_publisher.bind(config_address)
     print(f"Config publisher bound to {config_address}")
 except zmq.error.ZMQError as e:
