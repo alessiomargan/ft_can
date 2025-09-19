@@ -9,9 +9,6 @@ import threading
 import time
 import csv
 from collections import deque, defaultdict
-import numpy as np
-from scipy import signal
-import pandas as pd
 
 from utils import load_config, parse_hex_id
 
@@ -65,51 +62,3 @@ def log_to_csv(timestamp, rtr_id, variable, value):
         with open(csv_log_file, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([timestamp, f"0x{rtr_id:X}", variable, value])
-
-def apply_smoothing(x_values, y_values, method, window_size):
-    """Apply different smoothing methods to the data"""
-    if len(y_values) < window_size:
-        return x_values, y_values  # Not enough data points for smoothing
-    
-    if method == 'none':
-        return x_values, y_values  # No smoothing
-    
-    # Convert to numpy arrays for processing
-    x_array = np.array(x_values)
-    y_array = np.array(y_values)
-    
-    # Sort by x values to ensure time order
-    sort_idx = np.argsort(x_array)
-    x_sorted = x_array[sort_idx]
-    y_sorted = y_array[sort_idx]
-    
-    # Apply selected smoothing method
-    try:
-        if method == 'moving_avg':
-            # Simple moving average
-            kernel = np.ones(window_size) / window_size
-            y_smooth = np.convolve(y_sorted, kernel, mode='same')
-            
-            # Fix edge effects
-            half_window = window_size // 2
-            y_smooth[:half_window] = y_sorted[:half_window]
-            y_smooth[-half_window:] = y_sorted[-half_window:]
-            
-        elif method == 'savgol':
-            # Savitzky-Golay filter (polynomial smoothing)
-            polyorder = min(3, window_size - 1)  # Order of polynomial
-            y_smooth = signal.savgol_filter(y_sorted, window_size, polyorder)
-            
-        elif method == 'exponential':
-            # Exponential moving average
-            alpha = 2 / (window_size + 1)  # Smoothing factor
-            y_smooth = pd.Series(y_sorted).ewm(alpha=alpha).mean().values
-        
-        else:
-            return x_sorted, y_sorted  # Unknown method
-        
-        return x_sorted, y_smooth
-    
-    except Exception as e:
-        print(f"Error applying smoothing: {e}")
-        return x_sorted, y_sorted  # Return original data on error

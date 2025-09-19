@@ -12,7 +12,7 @@ import zmq
 from utils import parse_hex_id
 from shared_data import (
     data_buffers, timestamps, enabled_ids, enabled_ids_lock, 
-    rtr_configs, apply_smoothing, get_config_publisher, BUFFER_SIZE, DISPLAY_WINDOW
+    rtr_configs, get_config_publisher, BUFFER_SIZE, DISPLAY_WINDOW
 )
 
 # Dash app
@@ -92,40 +92,7 @@ app.layout = html.Div([
         ], style={'width': '48%', 'display': 'inline-block'})
     ], style={'margin-top': '20px', 'margin-bottom': '20px'}),
     
-    html.Div([
-        html.Div([
-            html.Label("Smoothing Method:"),
-            dcc.RadioItems(
-                id='smoothing-method',
-                options=[
-                    {'label': 'None', 'value': 'none'},
-                    {'label': 'Moving Average', 'value': 'moving_avg'},
-                    {'label': 'Savitzky-Golay', 'value': 'savgol'},
-                    {'label': 'Exponential', 'value': 'exponential'}
-                ],
-                value='none',
-                labelStyle={'display': 'inline-block', 'margin-right': '10px'}
-            )
-        ], style={'width': '48%', 'display': 'inline-block'}),
-        
-        html.Div([
-            html.Label("Smoothing Window Size:"),
-            dcc.Slider(
-                id='smoothing-window-slider',
-                min=3,
-                max=51,
-                step=2,  # Only odd numbers for window size
-                value=11,
-                marks={
-                    3: '3',
-                    11: '11',
-                    21: '21',
-                    31: '31',
-                    51: '51'
-                }
-            )
-        ], style={'width': '48%', 'display': 'inline-block'})
-    ], style={'margin-bottom': '20px'}),
+
     
     html.Div([
         html.Div([
@@ -212,14 +179,11 @@ def update_interval(value):
     Output('can-graph', 'figure'),
     Input('interval-component', 'n_intervals'),
     Input('display-window-slider', 'value'),
-    Input('smoothing-method', 'value'),
-    Input('smoothing-window-slider', 'value'),
     Input('data-resolution', 'value'),
     Input('max-points-slider', 'value'),
     *output_states
 )
-def update_graph(n, display_window_seconds, smoothing_method, smoothing_window, 
-                 data_resolution, max_points, *enabled_lists):
+def update_graph(n, display_window_seconds, data_resolution, max_points, *enabled_lists):
     new_enabled_ids = set()
     for idx, enabled in enumerate(enabled_lists):
         if 'enabled' in enabled:
@@ -269,38 +233,17 @@ def update_graph(n, display_window_seconds, smoothing_method, smoothing_window,
                         # Warning for very large datasets
                         print(f"Plotting {len(filtered_times)} points at full resolution - may affect performance")
                     
-                    # Apply smoothing if selected
-                    smoothed_times, smoothed_values = apply_smoothing(
-                        filtered_times, 
-                        filtered_values, 
-                        smoothing_method, 
-                        smoothing_window
-                    )
-                    
                     # Create the trace
                     trace = go.Scatter(
-                        x=smoothed_times,
-                        y=smoothed_values,
-                        mode='lines',  # Changed from 'lines+markers' for smoother appearance
+                        x=filtered_times,
+                        y=filtered_values,
+                        mode='lines+markers',
                         name=f'0x{rtr_id:X} {name}',
                         line=dict(
-                            shape='spline',  # Use spline interpolation for smoother curves
-                            smoothing=1.3 if smoothing_method != 'none' else 0.5  # Adjust curve smoothness
-                        )
+                            shape='linear'
+                        ),
+                        marker=dict(size=3)
                     )
-                    
-                    # If not using smoothing, add the original points as markers
-                    if smoothing_method == 'none':
-                        # Add original points as markers
-                        marker_trace = go.Scatter(
-                            x=smoothed_times,
-                            y=smoothed_values,
-                            mode='markers',
-                            marker=dict(size=3),
-                            name=f'0x{rtr_id:X} {name} (points)',
-                            showlegend=False
-                        )
-                        traces.append(marker_trace)
                     
                     traces.append(trace)
     
