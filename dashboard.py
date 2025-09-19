@@ -1,239 +1,19 @@
-import asyncio
 import dash
 import sys
 from dash import dcc, html
 from dash.dependencies import Output, Input, State
 import plotly.graph_objs as go
-from collections import deque, defaultdict
 import threading
 import time
-import yaml
 import json
-import csv
 import zmq
-import zmq.asyncio
-import numpy as np
-from scipy import signal
-import pandas as pd
 
-# Import utilities
-from utils import get_address, get_config_address, load_config, parse_hex_id
-
-# Load configuration
-config = load_config()
-
-# Force ZMQ socket cleanup for the config port
-try:
-    config_address = get_config_address()
-    port = int(config_address.split(':')[-1])
-    context = zmq.Context()
-    socket = context.socket(zmq.PUB)
-    socket.setsockopt(zmq.LINGER, 0)
-    socket.close()
-    context.term()
-    print(f"Cleaned up any lingering ZMQ sockets on port {port}")
-except Exception as e:
-    print(f"Note: ZMQ socket cleanup attempt: {e}")
-
-can_interface = config['can_interface']
-bitrate = config['bitrate']
-rtr_configs = config['rtr_ids']
-bitrate = config['bitrate']
-rtr_configs = config['rtr_ids']
-
-# Buffers for each variable per RTR ID - calculate buffer size based on sampling rate and time window
-SAMPLE_RATE = 20  # Hz (from your RTR configuration)
-DISPLAY_WINDOW = 5 * 60  # 5 minutes in seconds
-BUFFER_SIZE = SAMPLE_RATE * DISPLAY_WINDOW  # Points to keep in buffer
-
-# Create data buffers with calculated size
-data_buffers = defaultdict(lambda: defaultdict(lambda: deque(maxlen=BUFFER_SIZE)))
-timestamps = defaultdict(lambda: deque(maxlen=BUFFER_SIZE))
-
-# Define smoothing functions
-def apply_smoothing(x_values, y_values, method, window_size):
-    """Apply different smoothing methods to the data"""
-    if len(y_values) < window_size:
-        return x_values, y_values  # Not enough data points for smoothing
-    
-    if method == 'none':
-        return x_values, y_values  # No smoothing
-    
-    # Convert to numpy arrays for processing
-    x_array = np.array(x_values)
-    y_array = np.array(y_values)
-    
-    # Sort by x values to ensure time order
-    sort_idx = np.argsort(x_array)
-    x_sorted = x_array[sort_idx]
-    y_sorted = y_array[sort_idx]
-    
-    # Apply selected smoothing method
-    try:
-        if method == 'moving_avg':
-            # Simple moving average
-            kernel = np.ones(window_size) / window_size
-            y_smooth = np.convolve(y_sorted, kernel, mode='same')
-            
-            # Fix edge effects
-            half_window = window_size // 2
-            y_smooth[:half_window] = y_sorted[:half_window]
-            y_smooth[-half_window:] = y_sorted[-half_window:]
-            
-        elif method == 'savgol':
-            # Savitzky-Golay filter (polynomial smoothing)
-            polyorder = min(3, window_size - 1)  # Order of polynomial
-            y_smooth = signal.savgol_filter(y_sorted, window_size, polyorder)
-            
-        elif method == 'exponential':
-            # Exponential moving average
-            alpha = 2 / (window_size + 1)  # Smoothing factor
-            y_smooth = pd.Series(y_sorted).ewm(alpha=alpha).mean().values
-        
-        else:
-            return x_sorted, y_sorted  # Unknown method
-        
-        return x_sorted, y_smooth
-    
-    except Exception as e:
-        print(f"Error applying smoothing: {e}")
-        return x_sorted, y_sorted  # Return original data on error
-
-# Global data dictionary to store sensor values
-sensor_data = {}
-
-# Setup ZMQ publisher for sending configuration updates
-def setup_config_publisher(max_retries=3, retry_delay=0.5):
-    """Set up the config publisher with retries"""
-    for attempt in range(max_retries):
-        try:
-            context = zmq.Context()
-            config_publisher = context.socket(zmq.PUB)
-            # Set socket options
-            config_publisher.setsockopt(zmq.LINGER, 0)  # Don't keep messages around after socket close
-            config_publisher.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout on receive
-            config_publisher.setsockopt(zmq.SNDTIMEO, 1000)  # 1 second timeout on send
-            
-            config_address = get_config_address()
-            print(f"Attempt {attempt+1}/{max_retries}: Binding config publisher to {config_address}")
-            config_publisher.bind(config_address)
-            print(f"Successfully bound config publisher to {config_address}")
-            return config_publisher
-        except zmq.error.ZMQError as e:
-            print(f"Attempt {attempt+1}/{max_retries} failed: {e}")
-            if attempt < max_retries - 1:
-                print(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                print("All binding attempts failed.")
-                raise
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            raise
-
-try:
-    config_publisher = setup_config_publisher()
-except Exception as e:
-    print(f"ERROR: Could not bind config publisher: {e}")
-    print("Please ensure no other instances of the application are running.")
-    print("Exiting due to port binding failure.")
-    sys.exit(1)
-
-# Define locks and global variables
-csv_log_lock = threading.Lock()
-csv_log_file = 'can_data_log.csv'
-enabled_ids_lock = threading.Lock()
-enabled_ids = set(parse_hex_id(rtr['id']) for rtr in rtr_configs)  # Initialize with all RTR IDs
-
-# Create data buffers with calculated size
-def init_csv_log():
-    with csv_log_lock:
-        with open(csv_log_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            # Header: timestamp, rtr_id, variable, value
-            writer.writerow(['timestamp', 'rtr_id', 'variable', 'value'])
-
-init_csv_log()
-
-# Async ZMQ subscriber to receive CAN data
-async def subscribe_to_can_data():
-    # Create ZMQ subscriber
-    ctx = zmq.asyncio.Context()
-    subscriber = ctx.socket(zmq.SUB)
-    subscriber.connect(get_address())
-    
-    # Subscribe to all topics
-    subscriber.subscribe(b"")
-    
-    print(f"ZMQ subscriber connected to {get_address()}")
-    
-    while True:
-        try:
-            # Receive message with topic
-            topic, data = await subscriber.recv_multipart()
-            topic_str = topic.decode('utf8')
-            
-            # Parse the JSON data
-            received_data = json.loads(data.decode('utf8'))
-            
-            # Process data based on topic
-            if topic_str.startswith("CAN_"):
-                # Extract CAN ID from topic (format: "CAN_XXX" where XXX is hex)
-                can_id_hex = topic_str.split("_")[1]
-                can_id = int(can_id_hex, 16)
-                
-                # Check if this ID is enabled for display
-                with enabled_ids_lock:
-                    if can_id not in enabled_ids:
-                        continue
-                
-                # Find the corresponding RTR config
-                rtr_config = None
-                for rtr in rtr_configs:
-                    if parse_hex_id(rtr['id']) == can_id:
-                        rtr_config = rtr
-                        break
-                
-                if rtr_config:
-                    # Add timestamp
-                    current_time = time.time()
-                    timestamps[can_id].append(current_time)
-                    
-                    # Process each variable
-                    for var_name, value in received_data.items():
-                        # Store the value in the buffer
-                        data_buffers[can_id][var_name].append(value)
-                        
-                        # Log to CSV
-                        with csv_log_lock:
-                            with open(csv_log_file, 'a', newline='') as f:
-                                writer = csv.writer(f)
-                                writer.writerow([
-                                    current_time,
-                                    f"0x{can_id:X}",
-                                    var_name,
-                                    value
-                                ])
-            
-            elif topic_str == "SENSORS":
-                # This topic contains all accumulated sensor data
-                # We can use this for a global view if needed
-                pass
-                
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            print("ZMQ subscription interrupted")
-            break
-        except Exception as e:
-            print(f"Error processing ZMQ message: {e}")
-            await asyncio.sleep(0.1)
-
-# Start asyncio loop in background thread
-def start_async_loop():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(subscribe_to_can_data())
-
-threading.Thread(target=start_async_loop, daemon=True).start()
+# Import utilities and shared data
+from utils import parse_hex_id
+from shared_data import (
+    data_buffers, timestamps, enabled_ids, enabled_ids_lock, 
+    rtr_configs, apply_smoothing, get_config_publisher, BUFFER_SIZE, DISPLAY_WINDOW
+)
 
 # Dash app
 app = dash.Dash(__name__)
@@ -406,11 +186,15 @@ for rtr in rtr_configs:
             
             try:
                 # Send the configuration update
-                config_publisher.send_multipart([
-                    b"CONFIG", 
-                    json.dumps(update_data).encode("utf8")
-                ])
-                print(f"Dashboard sent frequency update for {rtr_id} to {frequency}Hz")
+                config_pub = get_config_publisher()
+                if config_pub:
+                    config_pub.send_multipart([
+                        b"CONFIG", 
+                        json.dumps(update_data).encode("utf8")
+                    ])
+                    print(f"Dashboard sent frequency update for {rtr_id} to {frequency}Hz")
+                else:
+                    print("Config publisher not available")
             except Exception as e:
                 print(f"Error sending frequency update: {e}")
         
@@ -539,7 +323,10 @@ def update_graph(n, display_window_seconds, smoothing_method, smoothing_window,
     # Return the complete figure
     return {'data': traces, 'layout': layout}
 
-if __name__ == '__main__':
-    # Run without debug mode to prevent double-launching (which causes port conflicts)
-    print("Starting Dash app without debug mode to prevent port conflicts")
+def run_dashboard():
+    """Function to run the dashboard"""
+    print("Starting Dash dashboard without debug mode to prevent port conflicts")
     app.run(debug=False, host='0.0.0.0', port=8050)
+
+if __name__ == '__main__':
+    run_dashboard()
