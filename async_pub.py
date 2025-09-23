@@ -13,317 +13,476 @@ from typing import Dict, List, Any
 
 from utils import get_address, get_config_address, load_config, parse_hex_id
 
-# Global dictionary to store dynamic RTR frequencies
-rtr_frequencies = {}
 
-# Global data dictionary to store sensor values
-sensor_data: Dict[str, Any] = {}
-
-def process_rtr_response(can_msg):
-    """Process a response to an RTR message"""
-    data_dict = {}
+class CANBusManager:
+    """Class to manage CAN bus communication with configuration handling"""
     
-    if can_msg.arbitration_id == 0x100:
-        # Interpret the data based on the message format we're receiving
-        # First 4 bytes for adc_ch1 (00 00 09 99) -> 2457 in decimal
-        # Last 4 bytes for adc_ch2 (00 00 00 14) -> 20 in decimal
+    def __init__(self, config_path="config.yaml"):
+        """Initialize the CAN bus manager with configuration"""
+        # Load configuration
+        self.config = load_config(config_path)
         
-        # Data format seems to be big-endian based on your example
-        data_dict["adc_ch1"] = struct.unpack('>i', can_msg.data[0:4])[0]
-        data_dict["adc_ch2"] = struct.unpack('>i', can_msg.data[4:8])[0]
+        # Dictionary to store dynamic RTR frequencies
+        self.rtr_frequencies = {}
         
-        # Print raw bytes for debugging
-        #print(f"Raw data: {' '.join([f'{b:02X}' for b in can_msg.data])}")
-        #print(f"adc_ch1 value: {data_dict['adc_ch1']} (hex: {data_dict['adc_ch1']:08X})")
-        #print(f"adc_ch2 value: {data_dict['adc_ch2']} (hex: {data_dict['adc_ch2']:08X})")
+        # Dictionary to store sensor values
+        self.sensor_data = {}
         
-    # Add processing for other RTR IDs here as needed
-    
-    return data_dict
-
-def create_rtr_message(rtr_config):
-    """Create an RTR message based on configuration"""
-    can_id = parse_hex_id(rtr_config["id"])
-    
-    # Create an RTR message (Remote Transmission Request)
-    # RTR messages have no data but request data from a node
-    message = can.Message(
-        arbitration_id=can_id,
-        is_remote_frame=True,
-        is_extended_id=False
-    )
-    
-    return message
-
-def simulate_rtr_response(rtr_config):
-    """Simulate a response to an RTR message for testing without hardware"""
-    can_id = parse_hex_id(rtr_config["id"])
-    
-    # For simulation purposes, create random data based on variable types
-    data_bytes = bytearray()
-    
-    for var in rtr_config.get("variables", []):
-        if var["type"] == "int32":
-            # Random value for an ADC channel (e.g., 0-4095 for 12-bit ADC)
-            value = random.randint(0, 4095)
-            data_bytes.extend(struct.pack('i', value))
-        # Add other data types as needed
-    
-    # Create a CAN message with the simulated data
-    message = can.Message(
-        arbitration_id=can_id,
-        data=data_bytes,
-        is_remote_frame=False,
-        is_extended_id=False
-    )
-    
-    return message
-
-async def send_rtr_messages(bus, rtr_configs):
-    """Send RTR messages at specified frequencies"""
-    # Track when each RTR message was last sent
-    last_sent = {parse_hex_id(cfg["id"]): 0 for cfg in rtr_configs}
-    
-    # Track the last used frequency for each RTR ID to detect changes
-    last_frequencies = {}
-    
-    # Initialize the frequency dictionary from config
-    for config in rtr_configs:
-        can_id = parse_hex_id(config["id"])
-        rtr_frequencies[can_id] = config.get("freq", 1.0)
-        last_frequencies[can_id] = rtr_frequencies[can_id]
-        print(f"Initial frequency for ID 0x{can_id:X}: {rtr_frequencies[can_id]}Hz")
-    
-    while True:
-        current_time = time.time()
+        # Get simulation mode setting from config
+        self.simulation_mode = self.config.get("simulation_mode", False)
         
-        for config in rtr_configs:
-            can_id = parse_hex_id(config["id"])
-            
-            # Get frequency from dynamic dictionary or fallback to config
-            frequency = rtr_frequencies.get(can_id, config.get("freq", 1.0))
-            
-            # Check if frequency has changed
-            if frequency != last_frequencies.get(can_id):
-                print(f"Frequency changed for ID 0x{can_id:X}: {last_frequencies.get(can_id)}Hz -> {frequency}Hz")
-                last_frequencies[can_id] = frequency
-            
-            period = 1.0 / frequency
-            
-            # Check if it's time to send this RTR message
-            if current_time - last_sent[can_id] >= period:
-                try:
-                    # Create and send the RTR message
-                    message = create_rtr_message(config)
-                    bus.send(message)
-                    last_sent[can_id] = current_time
-                    # Only print occasionally to avoid flooding the console
-                    if random.random() < 0.1:  # Print roughly 10% of the time
-                        print(f"Sent RTR request for ID: 0x{can_id:X} at {frequency}Hz")
-                except Exception as e:
-                    print(f"Error sending RTR message for ID 0x{can_id:X}: {e}")
+        # ZMQ publisher for data
+        self.data_publisher = None
         
-        # Short sleep to prevent busy-waiting
-        await asyncio.sleep(0.01)
-
-async def receive_config_updates():
-    """Receive configuration updates from the dashboard"""
-    global rtr_frequencies
+        # CAN bus interface
+        self.bus = None
+        
+        # Initialize RTR frequencies from config
+        self._initialize_rtr_frequencies()
+        
+        # Print simulation mode status
+        if self.simulation_mode:
+            print("⚠️  SIMULATION MODE IS ENABLED - Using simulated CAN data")
+        else:
+            print("💻 SIMULATION MODE IS DISABLED - Using real CAN hardware")
     
-    print("Starting configuration update receiver...")
+    def _initialize_rtr_frequencies(self):
+        """Initialize RTR frequencies from config"""
+        for rtr_config in self.config.get("rtr_ids", []):
+            can_id = parse_hex_id(rtr_config["id"])
+            frequency = float(rtr_config.get("freq", 0.0))
+            self.rtr_frequencies[can_id] = frequency
+            print(f"Initialized RTR frequency for ID 0x{can_id:X} to {frequency}Hz from config")
     
-    # Create ZMQ subscriber for configuration updates
-    ctx = zmq.asyncio.Context()
-    config_subscriber = ctx.socket(zmq.SUB)
-    
-    # Connect to the config publisher using the fixed address from config
-    config_address = get_config_address()
-    try:
-        config_subscriber.connect(config_address)
-        print(f"Connected to config publisher at {config_address}")
-    except Exception as e:
-        print(f"ERROR: Failed to connect to config publisher at {config_address}")
-        print(f"Error details: {e}")
-        print("Configuration updates will not work!")
-    
-    # Subscribe to the CONFIG topic
-    config_subscriber.subscribe(b"CONFIG")
-    print(f"Subscribed to CONFIG topic")
-    print(f"Initial RTR frequencies: {rtr_frequencies}")
-    
-    # Periodically print a heartbeat to show we're still listening
-    last_heartbeat = time.time()
-    
-    while True:
+    def setup_can_bus(self):
+        """Set up the CAN bus interface"""
+        # Get CAN interface from config
+        can_interface = self.config.get("can_interface", "can0")
+        
+        # Set up CAN filters for RTR IDs
+        rtr_configs = self.config.get("rtr_ids", [])
+        filters = []
+        
+        for rtr_config in rtr_configs:
+            can_id = parse_hex_id(rtr_config["id"])
+            filters.append({"can_id": can_id, "can_mask": 0x7FF})
+        
         try:
-            # Receive message with topic and timeout
-            message = await asyncio.wait_for(
-                config_subscriber.recv_multipart(),
-                timeout=5.0  # 5 second timeout
-            )
+            # Set up the CAN bus interface
+            if self.simulation_mode:
+                # In simulation mode, create a Bus object with any channel (won't be used)
+                print("Creating simulated CAN bus interface")
+                # Setup happens in __main__ section with SimulatedBus class
+                self.bus = can.interface.Bus(channel='vcan0', can_filters=filters)
+            else:
+                # Normal hardware mode
+                self.bus = can.interface.Bus(channel=can_interface, interface='socketcan', can_filters=filters)
             
-            if message:
-                topic, data = message
-                print(f"★★★ Received config update on topic: {topic.decode('utf8')} ★★★")
-                print(f"Raw data: {data.decode('utf8')}")
-                
-                # Parse the JSON data
-                config_update = json.loads(data.decode('utf8'))
-                
-                # Process configuration update
-                if config_update.get('type') == 'rtr_frequency_update':
-                    rtr_id_str = config_update.get('id')
-                    frequency = config_update.get('frequency')
-                    
-                    if rtr_id_str and frequency:
-                        rtr_id = parse_hex_id(rtr_id_str)
-                        # Get old frequency for comparison
-                        old_freq = rtr_frequencies.get(rtr_id, "not set")
-                        
-                        # Update the frequency in our global dictionary
-                        rtr_frequencies[rtr_id] = frequency
-                        print(f"Updated RTR frequency for {rtr_id_str} (ID: 0x{rtr_id:X}) from {old_freq} to {frequency}Hz")
-                        print(f"Updated frequencies dict: {rtr_frequencies}")
-        
-        except asyncio.TimeoutError:
-            # Print a heartbeat message every 30 seconds
-            current_time = time.time()
-            if current_time - last_heartbeat >= 30:
-                print("Config receiver still listening... (heartbeat)")
-                print(f"Current RTR frequencies: {rtr_frequencies}")
-                last_heartbeat = current_time
-            continue
-            
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            print("Configuration update reception interrupted")
-            break
-            
+            return True
         except Exception as e:
-            print(f"Error processing configuration update: {e}")
-            await asyncio.sleep(0.1)
-
-async def receive_can_messages(bus, publisher):
-    """Receive and process CAN messages"""
-    global sensor_data
+            print(f"Error setting up CAN bus: {e}")
+            return False
     
-    while True:
+    def setup_zmq_publisher(self):
+        """Set up the ZMQ publisher for data"""
         try:
-            # Receive CAN message
-            can_msg = bus.recv(timeout=0.1)
+            self.data_publisher = zmq.asyncio.Context().socket(zmq.PUB)
+            data_address = get_address()
+            self.data_publisher.bind(data_address)
+            print(f"Publisher bound to {data_address}")
+            return True
+        except zmq.error.ZMQError as e:
+            print(f"ERROR: Failed to bind data publisher to {get_address()}")
+            print(f"Error details: {e}")
+            print("Please ensure no other instances of the application are running.")
+            return False
+    
+    def create_rtr_message(self, rtr_config):
+        """Create an RTR message based on configuration"""
+        can_id = parse_hex_id(rtr_config["id"])
+        
+        # Create an RTR message (Remote Transmission Request)
+        message = can.Message(
+            arbitration_id=can_id,
+            is_remote_frame=True,
+            is_extended_id=False
+        )
+        
+        return message
+    
+    def process_rtr_response(self, can_msg):
+        """Process a response to an RTR message"""
+        data_dict = {}
+        
+        # Find the matching RTR configuration for this CAN ID
+        matching_config = None
+        for rtr_config in self.config.get("rtr_ids", []):
+            if parse_hex_id(rtr_config["id"]) == can_msg.arbitration_id:
+                matching_config = rtr_config
+                break
+        
+        if matching_config:
+            # Process the message using the configuration
+            current_offset = 0
+            for var in matching_config.get("variables", []):
+                var_name = var["name"]
+                var_format = var.get("format", ">i")  # Default to big-endian int32
+                
+                # Calculate size of this variable based on format
+                format_size = struct.calcsize(var_format)
+                
+                # Extract and unpack the data
+                try:
+                    if hasattr(can_msg, 'data') and current_offset + format_size <= len(can_msg.data):
+                        data_dict[var_name] = struct.unpack(
+                            var_format, 
+                            can_msg.data[current_offset:current_offset+format_size]
+                        )[0]
+                        
+                        # Move offset for next variable
+                        current_offset += format_size
+                    else:
+                        print(f"Warning: Not enough data in message to unpack {var_name} " 
+                              f"(need {format_size} bytes, have {len(can_msg.data) - current_offset} bytes)")
+                except struct.error as e:
+                    print(f"Error unpacking {var_name} with format {var_format}: {e}")
+                except Exception as e:
+                    print(f"Unexpected error processing {var_name}: {e}")
+        else:
+            print(f"Warning: Received CAN message with ID 0x{can_msg.arbitration_id:X} but no matching configuration found")
+        
+        return data_dict
+    
+    async def send_rtr_requests(self):
+        """Send RTR requests according to the configured frequencies"""
+        print("Starting RTR request sender")
+        
+        # Keep track of when we last sent each RTR request
+        last_sent = {}
+        last_frequencies = {}
+        
+        # Initialize last_sent for all RTR IDs
+        for can_id, frequency in self.rtr_frequencies.items():
+            last_sent[can_id] = 0
+            last_frequencies[can_id] = frequency
+            print(f"Initial frequency for ID 0x{can_id:X}: {self.rtr_frequencies[can_id]}Hz")
+        
+        while True:
+            # Get the current time
+            current_time = time.time()
             
-            if can_msg is None:
-                await asyncio.sleep(0.01)
+            # For each RTR ID, check if it's time to send a request
+            for can_id, frequency in self.rtr_frequencies.items():
+                # Only print frequency changes, not every loop
+                if last_frequencies.get(can_id) != frequency:
+                    print(f"Frequency changed for ID 0x{can_id:X}: {last_frequencies.get(can_id)}Hz -> {frequency}Hz")
+                    last_frequencies[can_id] = frequency
+                
+                # If frequency is 0, don't send
+                if frequency <= 0:
+                    continue
+                    
+                # Calculate time between requests based on frequency
+                interval = 1.0 / frequency
+                
+                # Check if it's time to send
+                if current_time - last_sent.get(can_id, 0) >= interval:
+                    try:
+                        # Create and send RTR message
+                        rtr_msg = self.create_rtr_message({"id": f"0x{can_id:X}"})
+                        self.bus.send(rtr_msg)
+                        last_sent[can_id] = current_time
+                        
+                        # Always print RTR request messages
+                        print(f"Sent RTR request for ID: 0x{can_id:X} at {frequency}Hz")
+                    except Exception as e:
+                        print(f"Error sending RTR message for ID 0x{can_id:X}: {e}")
+            
+            # Short sleep to prevent busy-waiting
+            await asyncio.sleep(0.01)
+    
+    async def receive_config_updates(self):
+        """Receive configuration updates from the dashboard"""
+        print("Starting configuration update receiver...")
+        
+        # Create ZMQ subscriber for configuration updates
+        ctx = zmq.asyncio.Context()
+        config_subscriber = ctx.socket(zmq.SUB)
+        
+        # Connect to the config publisher using the fixed address from config
+        config_address = get_config_address()
+        try:
+            config_subscriber.connect(config_address)
+            print(f"Connected to config publisher at {config_address}")
+        except Exception as e:
+            print(f"ERROR: Failed to connect to config publisher at {config_address}")
+            print(f"Error details: {e}")
+            print("Configuration updates will not work!")
+        
+        # Subscribe to the CONFIG topic
+        config_subscriber.subscribe(b"CONFIG")
+        print(f"Subscribed to CONFIG topic")
+        print(f"Initial RTR frequencies: {self.rtr_frequencies}")
+        
+        # Periodically print a heartbeat to show we're still listening
+        last_heartbeat = time.time()
+        
+        while True:
+            try:
+                # Receive message with topic and timeout
+                message = await asyncio.wait_for(
+                    config_subscriber.recv_multipart(),
+                    timeout=5.0  # 5 second timeout
+                )
+                
+                if message:
+                    topic, data = message
+                    print(f"★★★ Received config update on topic: {topic.decode('utf8')} ★★★")
+                    print(f"Raw data: {data.decode('utf8')}")
+                    
+                    # Parse the JSON data
+                    config_update = json.loads(data.decode('utf8'))
+                    
+                    # Process configuration update
+                    if config_update.get('type') == 'rtr_frequency_update':
+                        rtr_id_str = config_update.get('id')
+                        frequency = config_update.get('frequency')
+                        
+                        if rtr_id_str and frequency:
+                            rtr_id = parse_hex_id(rtr_id_str)
+                            # Get old frequency for comparison
+                            old_freq = self.rtr_frequencies.get(rtr_id, "not set")
+                            
+                            # Update the frequency in our dictionary
+                            self.rtr_frequencies[rtr_id] = frequency
+                            print(f"Updated RTR frequency for {rtr_id_str} (ID: 0x{rtr_id:X}) from {old_freq} to {frequency}Hz")
+                            print(f"Updated frequencies dict: {self.rtr_frequencies}")
+            
+            except asyncio.TimeoutError:
+                # Always print a heartbeat message
+                print("Config receiver still listening... (heartbeat)")
+                print(f"Current RTR frequencies: {self.rtr_frequencies}")
                 continue
                 
-            # Process the received message
-            if not can_msg.is_remote_frame:  # Process only data frames, not RTR requests
-                # Update sensor data with the processed values
-                received_data = process_rtr_response(can_msg)
-                if received_data:
-                    sensor_data.update(received_data)
-                    
-                    # Send the updated data via ZMQ
-                    await publisher.send_multipart([
-                        f"CAN_{can_msg.arbitration_id:X}".encode(),  # Topic
-                        json.dumps(received_data).encode("utf8")     # Data
-                    ])
-                    
-                    # Also send all accumulated sensor data
-                    await publisher.send_multipart([
-                        b"SENSORS",  # Topic for all sensor data
-                        json.dumps(sensor_data).encode("utf8")
-                    ])
-                    
-                    #print(f"Received data for ID 0x{can_msg.arbitration_id:X}: {received_data}")
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                print("Configuration update reception interrupted")
+                break
                 
-        except (asyncio.CancelledError, KeyboardInterrupt) as e:
-            print(f"Message reception interrupted: {e}")
-            raise
-        except Exception as e:
-            print(f"Error processing CAN message: {e}")
-            await asyncio.sleep(0.1)
-
-async def main():
-    # Load configuration
-    config = load_config()
+            except Exception as e:
+                print(f"Error processing configuration update: {e}")
+                await asyncio.sleep(0.1)
     
-    # Setup ZMQ publisher
-    publisher = zmq.asyncio.Context().socket(zmq.PUB)
-    try:
-        data_address = get_address()
-        publisher.bind(data_address)
-        print(f"Publisher bound to {data_address}")
-    except zmq.error.ZMQError as e:
-        print(f"ERROR: Failed to bind data publisher to {data_address}")
-        print(f"Error details: {e}")
-        print("Please ensure no other instances of the application are running.")
-        print("Exiting due to port binding failure.")
-        sys.exit(1)
-    
-    # Get CAN interface from config
-    can_interface = config.get("can_interface", "can0")
-    
-    # Set up CAN filters for RTR IDs
-    rtr_configs = config.get("rtr_ids", [])
-    filters = []
-    
-    for rtr_config in rtr_configs:
-        can_id = parse_hex_id(rtr_config["id"])
-        filters.append({"can_id": can_id, "can_mask": 0x7FF})
-    
-    try:
-        # Set up the CAN bus interface
-        bus = can.interface.Bus(channel=can_interface, interface='socketcan', can_filters=filters)
+    async def receive_can_messages(self):
+        """Receive and process CAN messages"""
+        print("Starting CAN message receiver loop")
+        message_count = 0
+        last_status_time = time.time()
         
-        # Create tasks for configuration updates, sending RTR messages, and receiving responses
-        tasks = [
-            asyncio.create_task(receive_config_updates()),
-            asyncio.create_task(send_rtr_messages(bus, rtr_configs)),
-            asyncio.create_task(receive_can_messages(bus, publisher))
-        ]
+        while True:
+            try:
+                # Receive CAN message
+                can_msg = self.bus.recv(timeout=0.1)
+                
+                if can_msg is None:
+                    await asyncio.sleep(0.01)
+                    continue
+                
+                message_count += 1
+                # Always log every message regardless of count
+                print(f"Received CAN message #{message_count}: ID=0x{can_msg.arbitration_id:X}")
+                    
+                # Process the received message
+                if not can_msg.is_remote_frame:  # Process only data frames, not RTR requests
+                    try:
+                        # Get configuration for this CAN ID
+                        matching_config = None
+                        for rtr_config in self.config.get("rtr_ids", []):
+                            if parse_hex_id(rtr_config["id"]) == can_msg.arbitration_id:
+                                matching_config = rtr_config
+                                break
+                        
+                        if matching_config:
+                            # Process data using the same approach for both simulation and hardware modes
+                            received_data = {}
+                            current_offset = 0
+                            
+                            for var in matching_config.get("variables", []):
+                                var_name = var["name"]
+                                var_format = var.get("format", ">i")  # Default to big-endian int32
+                                format_size = struct.calcsize(var_format)
+                                
+                                try:
+                                    if current_offset + format_size <= len(can_msg.data):
+                                        value = struct.unpack(
+                                            var_format,
+                                            can_msg.data[current_offset:current_offset+format_size]
+                                        )[0]
+                                        received_data[var_name] = value
+                                        current_offset += format_size
+                                    else:
+                                        print(f"Not enough data for {var_name}: need {format_size} bytes, have {len(can_msg.data) - current_offset}")
+                                except struct.error as e:
+                                    print(f"Error unpacking {var_name} with format {var_format}: {e}")
+                                except Exception as e:
+                                    print(f"Unexpected error processing {var_name}: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                        else:
+                            print(f"No matching config for CAN ID 0x{can_msg.arbitration_id:X}")
+                            received_data = {}
+                        
+                        # Update sensor data and publish it
+                        if received_data:
+                            self.sensor_data.update(received_data)
+                            
+                            # Send the updated data via ZMQ
+                            await self.data_publisher.send_multipart([
+                                f"CAN_{can_msg.arbitration_id:X}".encode(),  # Topic with ID in hex format
+                                json.dumps(received_data).encode("utf8")     # Data
+                            ])
+                            
+                            # Also send all accumulated sensor data
+                            await self.data_publisher.send_multipart([
+                                b"SENSORS",  # Topic for all sensor data
+                                json.dumps(self.sensor_data).encode("utf8")
+                            ])
+                            
+                            # Always print the data for every message
+                            print(f"Data for ID 0x{can_msg.arbitration_id:X}: {received_data}")
+                        else:
+                            print(f"Warning: Received CAN message for ID 0x{can_msg.arbitration_id:X} but no data was extracted")
+                    
+                    except Exception as e:
+                        print(f"Error processing CAN message data: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+            except (asyncio.CancelledError, KeyboardInterrupt) as e:
+                print(f"Message reception interrupted: {e}")
+                raise
+            except Exception as e:
+                print(f"Error processing CAN message: {e}")
+                import traceback
+                traceback.print_exc()
+                await asyncio.sleep(0.1)
+    
+    async def run(self):
+        """Run the CAN bus manager with all its tasks"""
+        # Setup CAN bus
+        if not self.setup_can_bus():
+            print("Failed to set up CAN bus. Exiting.")
+            return
         
-        # Run the tasks concurrently
-        await asyncio.gather(*tasks)
+        # Setup ZMQ publisher
+        if not self.setup_zmq_publisher():
+            print("Failed to set up ZMQ publisher. Exiting.")
+            return
         
-    except (asyncio.CancelledError, KeyboardInterrupt) as e:
-        print(f"Program interrupted: {e}")
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        # Clean up
         try:
-            bus.shutdown()
-            publisher.close()
-        except:
-            pass
+            # Create tasks for configuration updates, sending RTR messages, and receiving responses
+            tasks = [
+                asyncio.create_task(self.receive_config_updates()),
+                asyncio.create_task(self.send_rtr_requests()),
+                asyncio.create_task(self.receive_can_messages())
+            ]
+            
+            # Run the tasks concurrently
+            await asyncio.gather(*tasks)
+            
+        except (asyncio.CancelledError, KeyboardInterrupt) as e:
+            print(f"Program interrupted: {e}")
+        except Exception as e:
+            print(f"Error: {e}")
+        finally:
+            # Clean up
+            try:
+                self.bus.shutdown()
+                self.data_publisher.close()
+            except:
+                pass
+
+
+class SimulatedBus(can.BusABC):
+    """Simulated CAN Bus class for testing without hardware"""
+    
+    def __init__(self, channel=None, *args, **kwargs):
+        super().__init__(channel=channel, *args, **kwargs)
+        self._recv_buffer = []
+        print("Created SimulatedBus instance")
+        
+    def send(self, msg, timeout=None):
+        # Only print RTR messages - these are the explicit requests
+        if msg.is_remote_frame:
+            print(f"Sending RTR request: ID=0x{msg.arbitration_id:X}")
+            # Find matching config for this RTR
+            matching_config = None
+            for cfg in load_config().get("rtr_ids", []):
+                if parse_hex_id(cfg["id"]) == msg.arbitration_id:
+                    matching_config = cfg
+                    break
+            
+            if matching_config:
+                # Create a simulated response
+                can_id = parse_hex_id(matching_config["id"])
+                data_bytes = bytearray()
+                
+                for var in matching_config.get("variables", []):
+                    var_format = var.get("format", ">i")  # Default to big-endian int32
+                    var_type = var.get("type", "int32")
+                    
+                    # Generate random value based on variable type
+                    if var_type == "int32":
+                        value = random.randint(0, 4095)
+                    elif var_type == "float32":
+                        value = random.uniform(0, 100)
+                    elif var_type == "uint16":
+                        value = random.randint(0, 65535)
+                    elif var_type == "uint8":
+                        value = random.randint(0, 255)
+                    else:
+                        value = random.randint(0, 4095)
+                    
+                    # Pack using the specified format
+                    try:
+                        data_bytes.extend(struct.pack(var_format, value))
+                    except struct.error as e:
+                        print(f"Error packing {var['name']} with format {var_format}: {e}")
+                        data_bytes.extend(struct.pack(">i", 0))
+                
+                # Create a mock message for the response
+                response = can.Message(
+                    arbitration_id=can_id,
+                    data=data_bytes,
+                    is_remote_frame=False,
+                    is_extended_id=False
+                )
+                
+                # Add to the receive buffer
+                self._recv_buffer.append(response)
+        
+        return True
+            
+    def _recv_internal(self, timeout=None):
+        if self._recv_buffer:
+            msg = self._recv_buffer.pop(0)
+            # Return a tuple of (message, is_filtered) as expected by can.BusABC implementation
+            return msg, False
+        return None, None
+    
+    def shutdown(self):
+        print("Shutting down SimulatedBus")
+        pass
+
 
 if __name__ == '__main__':
-    # Enable simulation mode for testing without actual CAN hardware
-    SIMULATION_MODE = False
+    # Create an instance of CANBusManager
+    manager = CANBusManager()
     
-    if SIMULATION_MODE:
-        # Monkey patch the can.Bus.recv method to simulate responses
-        original_send = can.interface.Bus.send
-        
-        def mock_send(self, msg, *args, **kwargs):
-            print(f"Sending RTR message: ID=0x{msg.arbitration_id:X}")
-            if msg.is_remote_frame:
-                # Find matching config for this RTR
-                config = None
-                for cfg in load_config().get("rtr_ids", []):
-                    if parse_hex_id(cfg["id"]) == msg.arbitration_id:
-                        config = cfg
-                        break
-                
-                if config:
-                    # Create a simulated response
-                    response = simulate_rtr_response(config)
-                    # Add to the receive buffer
-                    self._recv_buffer.append(response)
-            
-            return original_send(self, msg, *args, **kwargs)
-        
-        # Apply the monkey patch
-        can.interface.Bus.send = mock_send
+    # If in simulation mode, override the Bus class with our simulated version
+    if manager.simulation_mode:
+        print("RUNNING IN SIMULATION MODE - No actual CAN hardware needed")
+        # Override the Bus class with our simulated version
+        can.interface.Bus = SimulatedBus
     
-    asyncio.run(main())
+    # Run the manager
+    asyncio.run(manager.run())

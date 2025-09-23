@@ -5,7 +5,25 @@ SHELL := /usr/bin/env bash
 #######
 
 .DEFAULT_GOAL := help
-.PHONY: help mk-conda-env rm-conda-env up-conda-env run run-app run-backend run-pub run-sub run-both test clean monitor log kill kill-app kill-backend kill-pub
+.PHONY: help mk-conda-env rm-conda-env up-conda-env run run-app run-backend run-pub run-sub run-both run-app-pub test clean monitor log kill kill-app kill-backend kill-pub debug-memory debug-clear-memory sim-on sim-off
+
+debug-memory:  ## Check the status of shared memory buffers
+	@echo "Checking shared memory status..."
+	$(CONDA_ACTIVATE) && python debug_shared_memory.py
+
+debug-clear-memory:  ## Periodically clear shared memory to test synchronization
+	@echo "WARNING: This will clear all data buffers periodically"
+	$(CONDA_ACTIVATE) && python debug_clear_memory.py
+	
+sim-on:  ## Enable simulation mode (no hardware needed)
+	@echo "Enabling simulation mode..."
+	@sed -i 's/simulation_mode:.*/simulation_mode: true  # Set to true to simulate CAN data without hardware, false for real hardware/g' config.yaml
+	@echo "Simulation mode is now ON. Run your application to see simulated data."
+
+sim-off:  ## Disable simulation mode (use real hardware)
+	@echo "Disabling simulation mode..."
+	@sed -i 's/simulation_mode:.*/simulation_mode: false  # Set to true to simulate CAN data without hardware, false for real hardware/g' config.yaml
+	@echo "Simulation mode is now OFF. Real CAN hardware will be used."
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
@@ -42,24 +60,37 @@ up-conda-env:  ## Update the conda environment with any changes in the yml file
 ###################
 
 run: kill  ## Run complete system: publisher + backend + dashboard (recommended)
-	@echo "Starting complete CAN system (publisher, data collection, then dashboard)..."
+	@echo "Starting complete CAN system..."
+	@echo "1. Starting publisher (for RTR requests)..."
 	$(CONDA_ACTIVATE) && python async_pub.py & \
 	sleep 2 && \
+	echo "2. Starting data collection backend..." && \
 	python async_sub.py & \
 	sleep 2 && \
+	echo "3. Starting dashboard (for visualization and RTR frequency control)..." && \
 	python dashboard.py
 
 run-backend: kill-backend  ## Run the CAN data collection backend
 	@echo "Starting CAN data collection backend..."
 	$(CONDA_ACTIVATE) && python async_sub.py
 
-run-app: kill-app  ## Run the CAN bus dashboard application only
+run-app: kill-app  ## Run the CAN bus dashboard application only (run after run-pub)
 	@echo "Starting CAN bus dashboard application..."
+	@echo "NOTE: Make sure async_pub.py is already running for RTR controls to work"
 	$(CONDA_ACTIVATE) && python dashboard.py
 
 run-pub: kill-pub  ## Run the CAN publisher service with RTR handling
 	@echo "Starting CAN publisher service with RTR handling..."
 	$(CONDA_ACTIVATE) && python async_pub.py
+
+run-app-pub: kill-app kill-pub  ## Run both publisher and dashboard (most common use case)
+	@echo "Step 1: Cleaning up any existing ZMQ sockets..."
+	-$(CONDA_ACTIVATE) && python -c "import zmq; ctx=zmq.Context(); ctx.term()" 2>/dev/null || true
+	@echo "Step 2: Starting CAN publisher service with RTR handling..."
+	$(CONDA_ACTIVATE) && python async_pub.py & \
+	sleep 3 && \
+	echo "Step 3: Starting CAN bus dashboard application (controls RTR frequencies)..." && \
+	$(CONDA_ACTIVATE) && python dashboard.py
 
 run-both: kill  ## Run using the unified run.py script (backend + dashboard)
 	@echo "Starting CAN system using run.py..."

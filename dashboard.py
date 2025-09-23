@@ -1,275 +1,346 @@
+#!/usr/bin/env python
+
 import dash
 import sys
+import zmq
+import json
 from dash import dcc, html
-from dash.dependencies import Output, Input, State
+from dash.dependencies import Output, Input
 import plotly.graph_objs as go
 import threading
 import time
-import json
-import zmq
+from collections import deque, defaultdict
 
-# Import utilities and shared data
-from utils import parse_hex_id
-from shared_data import (
-    data_buffers, timestamps, enabled_ids, enabled_ids_lock, 
-    rtr_configs, get_config_publisher, BUFFER_SIZE, DISPLAY_WINDOW
-)
+# Import utilities
+from utils import load_config, parse_hex_id, get_address, get_config_address
 
-# Dash app
+# Global variables
+config = load_config()
+can_interface = config['can_interface']
+bitrate = config['bitrate']
+rtr_configs = config['rtr_ids']
+
+# Buffer settings
+SAMPLE_RATE = 20  # Hz (max expected sampling rate)
+DISPLAY_WINDOW = 5 * 60  # 5 minutes in seconds
+BUFFER_SIZE = SAMPLE_RATE * DISPLAY_WINDOW  # Points to keep in buffer
+
+# Data buffers
+data_buffers = {}
+timestamps = {}
+
+# Initialize data structures for each RTR ID
+for rtr in rtr_configs:
+    rtr_id = parse_hex_id(rtr['id'])
+    data_buffers[rtr_id] = {}
+    timestamps[rtr_id] = deque(maxlen=BUFFER_SIZE)
+    
+    for var in rtr.get('variables', []):
+        data_buffers[rtr_id][var['name']] = deque(maxlen=BUFFER_SIZE)
+
+# ZMQ setup
+context = zmq.Context()
+
+# Publisher for config updates
+config_publisher = context.socket(zmq.PUB)
+config_publisher.setsockopt(zmq.LINGER, 0)
+config_address = get_config_address()
+try:
+    config_publisher.bind(config_address)
+    print(f"Config publisher bound to {config_address}")
+except Exception as e:
+    print(f"ERROR: Failed to bind config publisher: {e}")
+    config_publisher = None
+
+# Subscriber for data
+data_subscriber = context.socket(zmq.SUB)
+data_subscriber.setsockopt(zmq.LINGER, 0)
+data_subscriber.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
+data_address = get_address()
+try:
+    data_subscriber.connect(data_address)
+    data_subscriber.subscribe(b"CAN_")
+    print(f"Data subscriber connected to {data_address}")
+except Exception as e:
+    print(f"ERROR: Failed to connect data subscriber: {e}")
+    data_subscriber = None
+
+# Data reception thread
+def receive_data():
+    if not data_subscriber:
+        print("WARNING: Data subscriber not available")
+        return
+    
+    print("Starting data reception thread")
+    connection_check_time = time.time()
+    data_received = False
+    
+    while True:
+        try:
+            # Try to receive a message with timeout
+            topic, data = data_subscriber.recv_multipart()
+            topic_str = topic.decode('utf8')
+            
+            # Process data
+            if topic_str.startswith("CAN_"):
+                # Extract CAN ID from topic (format: "CAN_XXX" where XXX is hex)
+                can_id_hex = topic_str.split("_")[1]
+                can_id = int(can_id_hex, 16)
+                
+                if can_id in data_buffers:
+                    received_data = json.loads(data.decode('utf8'))
+                    
+                    # Add timestamp
+                    current_time = time.time()
+                    timestamps[can_id].append(current_time)
+                    
+                    # Process each variable
+                    for var_name, value in received_data.items():
+                        if var_name in data_buffers[can_id]:
+                            data_buffers[can_id][var_name].append(value)
+                    
+                    if not data_received:
+                        print(f"Dashboard received first data packet for CAN ID 0x{can_id:X}: {received_data}")
+                        data_received = True
+                    else:
+                        # Only print occasional updates
+                        if time.time() - connection_check_time > 10:
+                            print(f"Dashboard is receiving data: CAN ID 0x{can_id:X} latest value: {received_data}")
+                            connection_check_time = time.time()
+        
+        except zmq.error.Again:
+            # Timeout occurred, check connection status periodically
+            current_time = time.time()
+            if current_time - connection_check_time > 10:
+                if data_received:
+                    print("Data reception is active but no data received in the last 10 seconds")
+                else:
+                    print("No data has been received yet - is async_pub.py running?")
+                connection_check_time = current_time
+        except Exception as e:
+            print(f"Error in data reception thread: {e}")
+            time.sleep(0.1)
+
+# Start the data reception thread
+data_thread = threading.Thread(target=receive_data, daemon=True)
+data_thread.start()
+
+# Create the Dash app
 app = dash.Dash(__name__)
 app.layout = html.Div([
-    html.H2("Real-Time CAN Data via ZMQ"),
+    html.H2("CAN Bus Data Dashboard"),
     
+    # RTR Configuration Controls
     html.Div([
+        html.H4("RTR Settings"),
         html.Div([
-            html.H4("CAN Configuration"),
             html.Div([
+                html.Label(f"ID: 0x{parse_hex_id(rtr['id']):X}"),
                 html.Div([
-                    html.Label(f"RTR ID: {rtr['id']}"),
-                    html.Div([
-                        html.Label(f"Frequency (Hz):"),
-                        dcc.Slider(
-                            id=f'freq-slider-{rtr["id"]}',
-                            min=1,
-                            max=50,
-                            step=1,
-                            value=float(rtr.get('freq', 10)),  # Default from config or 10Hz
-                            marks={
-                                1: '1',
-                                10: '10',
-                                20: '20',
-                                30: '30',
-                                40: '40',
-                                50: '50'
-                            }
-                        ),
-                    ]),
+                    html.Label("Frequency (Hz):"),
+                    dcc.Slider(
+                        id=f'freq-{rtr["id"]}',
+                        min=0,
+                        max=50,
+                        step=1,
+                        value=float(rtr.get('freq', 10)),
+                        marks={i: str(i) for i in range(0, 51, 10)}
+                    ),
+                    html.Div(id=f'freq-value-{rtr["id"]}'),
+                ]),
+                html.Div([
                     dcc.Checklist(
                         id=f'enable-{rtr["id"]}',
                         options=[{'label': 'Enable', 'value': 'enabled'}],
-                        value=['enabled'],
-                        inline=True
+                        value=['enabled']
                     )
-                ], style={'marginBottom': '15px', 'padding': '10px', 'border': '1px solid #ddd', 'borderRadius': '5px'})
+                ])
+            ], style={'border': '1px solid #ddd', 'padding': '10px', 'margin': '5px', 'borderRadius': '5px'})
             for rtr in rtr_configs
-            ])
-        ], style={'width': '100%', 'marginBottom': '20px'}),
+        ], style={'display': 'flex', 'flexWrap': 'wrap'})
     ]),
+    
+    # Graph
     dcc.Graph(id='can-graph'),
+    
+    # Display Settings
     html.Div([
         html.Div([
-            html.Label("Update Interval: "),
+            html.Label("Update Interval (ms):"),
             dcc.Slider(
-                id='update-interval-slider',
+                id='update-interval',
                 min=100,
                 max=2000,
                 step=100,
                 value=500,
-                marks={
-                    100: '100ms',
-                    500: '500ms',
-                    1000: '1s',
-                    2000: '2s'
-                }
+                marks={i: str(i) for i in range(100, 2001, 500)}
             )
         ], style={'width': '48%', 'display': 'inline-block'}),
         
         html.Div([
-            html.Label("Display Window (seconds): "),
+            html.Label("Display Window (seconds):"),
             dcc.Slider(
-                id='display-window-slider',
-                min=30,
-                max=DISPLAY_WINDOW,
-                step=30,
-                value=60,  # Default to 1 minute
-                marks={
-                    30: '30s',
-                    60: '1m',
-                    300: '5m',
-                    DISPLAY_WINDOW: f'{DISPLAY_WINDOW//60}m'
-                }
+                id='display-window',
+                min=10,
+                max=300,
+                step=10,
+                value=60,
+                marks={i: str(i) for i in range(0, 301, 60)}
             )
         ], style={'width': '48%', 'display': 'inline-block'})
-    ], style={'margin-top': '20px', 'margin-bottom': '20px'}),
+    ]),
     
-
-    
-    html.Div([
-        html.Div([
-            html.Label("Data Resolution:"),
-            dcc.RadioItems(
-                id='data-resolution',
-                options=[
-                    {'label': 'Optimized (Downsampled)', 'value': 'downsampled'},
-                    {'label': 'Full Resolution', 'value': 'full'}
-                ],
-                value='downsampled',
-                labelStyle={'display': 'inline-block', 'margin-right': '10px'}
-            )
-        ], style={'width': '48%', 'display': 'inline-block'}),
-        
-        html.Div([
-            html.Label("Maximum Points (if downsampling):"),
-            dcc.Slider(
-                id='max-points-slider',
-                min=500,
-                max=10000,
-                step=500,
-                value=1000,
-                marks={
-                    500: '500',
-                    1000: '1k',
-                    2500: '2.5k',
-                    5000: '5k',
-                    10000: '10k'
-                }
-            )
-        ], style={'width': '48%', 'display': 'inline-block'})
-    ], style={'margin-bottom': '20px'}),
-    dcc.Interval(id='interval-component', interval=500, n_intervals=0)
+    # Update interval component
+    dcc.Interval(
+        id='interval-component',
+        interval=500,
+        n_intervals=0
+    )
 ])
 
-# Dynamically create State for each checklist
-output_states = [State(f'enable-{rtr["id"]}', 'value') for rtr in rtr_configs]
+# Create frequency slider callbacks with a function factory
+def create_freq_callback(rtr_id):
+    @app.callback(
+        Output(f'freq-value-{rtr_id}', 'children'),
+        Input(f'freq-{rtr_id}', 'value')
+    )
+    def update_freq_value(value):
+        return f"Current frequency: {value} Hz"
+    
+    return update_freq_value
 
-# Create dynamic callbacks for each RTR frequency slider
+# Register callbacks for each RTR ID
 for rtr in rtr_configs:
     rtr_id = rtr['id']
+    create_freq_callback(rtr_id)
+
+# Update interval callback
+@app.callback(
+    Output('interval-component', 'interval'),
+    Input('update-interval', 'value')
+)
+def update_interval(value):
+    return value
+
+# Main graph update callback
+@app.callback(
+    Output('can-graph', 'figure'),
+    [Input('interval-component', 'n_intervals'),
+     Input('display-window', 'value')] +
+    [Input(f'freq-{rtr["id"]}', 'value') for rtr in rtr_configs] +
+    [Input(f'enable-{rtr["id"]}', 'value') for rtr in rtr_configs]
+)
+def update_graph(n_intervals, display_window, *args):
+    # Process all inputs: first half are frequencies, second half are enabled states
+    n_rtrs = len(rtr_configs)
     
-    @app.callback(
-        Output('interval-component', 'disabled'),  # Dummy output, not actually used
-        Input(f'freq-slider-{rtr_id}', 'value'),
-        State(f'enable-{rtr_id}', 'value'),
-        prevent_initial_call=True  # Prevent callback on initial load
-    )
-    def update_rtr_frequency(frequency, enabled, rtr_id=rtr_id):
-        if 'enabled' in enabled:
-            # Send updated frequency to async_pub via ZMQ
+    # Safety check for argument count
+    if len(args) < n_rtrs * 2:
+        print(f"Warning: Not enough arguments to update_graph. Expected {n_rtrs*2}, got {len(args)}")
+        # Return empty figure if we don't have enough data
+        return {
+            'data': [], 
+            'layout': go.Layout(
+                title='CAN Bus Data (Waiting for inputs...)',
+                xaxis={'title': 'Time'},
+                yaxis={'title': 'Value'}
+            )
+        }
+        
+    frequencies = args[:n_rtrs]
+    enabled_states = args[n_rtrs:]
+    
+    # Update RTR frequencies via ZMQ
+    for i, rtr in enumerate(rtr_configs):
+        if i >= len(frequencies) or i >= len(enabled_states):
+            continue  # Skip if index out of range
+            
+        rtr_id = rtr['id']
+        frequency = frequencies[i]
+        enabled = enabled_states[i]
+        
+        # Send frequency update if enabled
+        # Check if enabled is a list and contains 'enabled'
+        is_enabled = enabled and isinstance(enabled, list) and 'enabled' in enabled
+        
+        if is_enabled and config_publisher:
             update_data = {
                 'type': 'rtr_frequency_update',
                 'id': rtr_id,
                 'frequency': frequency
             }
-            
             try:
-                # Send the configuration update
-                config_pub = get_config_publisher()
-                if config_pub:
-                    config_pub.send_multipart([
-                        b"CONFIG", 
-                        json.dumps(update_data).encode("utf8")
-                    ])
-                    print(f"Dashboard sent frequency update for {rtr_id} to {frequency}Hz")
-                else:
-                    print("Config publisher not available")
+                config_publisher.send_multipart([
+                    b"CONFIG", 
+                    json.dumps(update_data).encode("utf8")
+                ])
             except Exception as e:
                 print(f"Error sending frequency update: {e}")
-        
-        # Return False to keep the interval component enabled
-        return False
-
-@app.callback(
-    Output('interval-component', 'interval'),
-    Input('update-interval-slider', 'value')
-)
-def update_interval(value):
-    return value
-
-@app.callback(
-    Output('can-graph', 'figure'),
-    Input('interval-component', 'n_intervals'),
-    Input('display-window-slider', 'value'),
-    Input('data-resolution', 'value'),
-    Input('max-points-slider', 'value'),
-    *output_states
-)
-def update_graph(n, display_window_seconds, data_resolution, max_points, *enabled_lists):
-    new_enabled_ids = set()
-    for idx, enabled in enumerate(enabled_lists):
-        if 'enabled' in enabled:
-            new_enabled_ids.add(parse_hex_id(rtr_configs[idx]['id']))
     
-    # Update global enabled_ids for filtering
-    with enabled_ids_lock:
-        enabled_ids.clear()
-        enabled_ids.update(new_enabled_ids)
-    
+    # Generate graph
     traces = []
     current_time = time.time()
-    time_cutoff = current_time - display_window_seconds
+    time_cutoff = current_time - display_window
     
+    # Collect enabled RTR IDs
+    enabled_rtr_ids = set()
+    for i, rtr in enumerate(rtr_configs):
+        if i < len(enabled_states) and enabled_states[i] and isinstance(enabled_states[i], list) and 'enabled' in enabled_states[i]:
+            enabled_rtr_ids.add(parse_hex_id(rtr['id']))
+    
+    # Generate traces for each enabled RTR ID and variable
     for rtr in rtr_configs:
         rtr_id = parse_hex_id(rtr['id'])
-        if rtr_id not in new_enabled_ids:
+        if rtr_id not in enabled_rtr_ids:
             continue
         
-        for var in rtr['variables']:
-            name = var['name']
-            # Check if we have data for this variable
-            if name in data_buffers[rtr_id] and len(data_buffers[rtr_id][name]) > 0:
-                # Filter data points based on the selected time window
+        for var in rtr.get('variables', []):
+            var_name = var['name']
+            
+            # Check if we have data
+            if var_name in data_buffers[rtr_id] and len(data_buffers[rtr_id][var_name]) > 0:
+                # Get times and values
                 times = list(timestamps[rtr_id])
-                values = list(data_buffers[rtr_id][name])
+                values = list(data_buffers[rtr_id][var_name])
                 
-                # Only keep points within the selected time window
+                # Ensure we have matching times and values
+                min_len = min(len(times), len(values))
+                if min_len == 0:
+                    continue
+                    
+                times = times[:min_len]
+                values = values[:min_len]
+                
+                # Filter by time window
                 filtered_data = [(t, v) for t, v in zip(times, values) if t >= time_cutoff]
                 
                 if filtered_data:
-                    filtered_times, filtered_values = zip(*filtered_data)
+                    # Unzip filtered data
+                    x_values, y_values = zip(*filtered_data)
                     
-                    # Apply downsampling if selected and needed
-                    if data_resolution == 'downsampled' and len(filtered_times) > max_points:
-                        # Calculate the downsampling factor
-                        downsample_factor = len(filtered_times) // max_points
-                        # Ensure factor is at least 1
-                        downsample_factor = max(1, downsample_factor)
-                        
-                        # Apply downsampling
-                        filtered_times = filtered_times[::downsample_factor]
-                        filtered_values = filtered_values[::downsample_factor]
-                        
-                        print(f"Downsampled from {len(filtered_data)} to {len(filtered_times)} points")
-                    elif data_resolution == 'full' and len(filtered_times) > 10000:
-                        # Warning for very large datasets
-                        print(f"Plotting {len(filtered_times)} points at full resolution - may affect performance")
-                    
-                    # Create the trace
+                    # Create trace
                     trace = go.Scatter(
-                        x=filtered_times,
-                        y=filtered_values,
-                        mode='lines+markers',
-                        name=f'0x{rtr_id:X} {name}',
-                        line=dict(
-                            shape='linear'
-                        ),
-                        marker=dict(size=3)
+                        x=x_values,
+                        y=y_values,
+                        mode='lines',
+                        name=f"0x{rtr_id:X} - {var_name}"
                     )
-                    
                     traces.append(trace)
     
-    # Create the figure layout
+    # Create layout
     layout = go.Layout(
-        title='CAN Variables over Time', 
+        title='CAN Bus Data',
         xaxis={
             'title': 'Time',
-            'type': 'date',
-            'range': [time_cutoff, current_time]
-        }, 
+            'type': 'date'
+        },
         yaxis={'title': 'Value'},
-        legend={'title': 'Variables'},
-        hovermode='closest',
-        margin=dict(l=50, r=20, t=50, b=50),
-        plot_bgcolor='rgb(250, 250, 250)',
-        paper_bgcolor='white'
+        margin={'l': 50, 'r': 20, 't': 50, 'b': 50}
     )
     
-    # Return the complete figure
     return {'data': traces, 'layout': layout}
 
-def run_dashboard():
-    """Function to run the dashboard"""
-    print("Starting Dash dashboard without debug mode to prevent port conflicts")
-    app.run(debug=False, host='0.0.0.0', port=8050)
-
 if __name__ == '__main__':
-    run_dashboard()
+    print("Starting CAN bus dashboard")
+    print("Make sure async_pub.py is running to provide data")
+    app.run(debug=False, host='0.0.0.0', port=8050)

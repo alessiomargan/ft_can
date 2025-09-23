@@ -30,7 +30,21 @@ def is_port_in_use(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 def parse_hex_id(id_str):
-    """Parse hex string into integer"""
-    if isinstance(id_str, str) and id_str.startswith("0x"):
-        return int(id_str, 16)
+    """
+    Parse CAN ID in various formats to integer
+    - If string starts with "0x", parse as hex
+    - If integer, return as is
+    """
+    if isinstance(id_str, str):
+        if id_str.startswith("0x"):
+            return int(id_str, 16)
+        # Try to parse as hex anyway if it's a string but doesn't have 0x prefix
+        try:
+            # Only attempt hex parsing if the string looks like it might be hexadecimal
+            if all(c in '0123456789ABCDEFabcdef' for c in id_str):
+                return int(id_str, 16)
+        except ValueError:
+            pass
+    
+    # If integer or failed to parse as hex, return as is
     return id_str

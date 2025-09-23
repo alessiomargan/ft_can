@@ -1,19 +1,82 @@
 can_interface: can0
 bitrate: 500000
 
+# System Configuration
+simulation_mode: false  # Set to true to simulate CAN data without hardware, false for real hardware
+
 # ZMQ Configuration
 zmq:
   data_port: 10101  # Port for CAN data publishing
   config_port: 10102  # Port for configuration messages
 
+# Format specifiers for variables:
+# The 'format' field uses Python's struct module format characters:
+#   '>' = Big-endian (network byte order)
+#   '<' = Little-endian
+#   'i' = 4-byte signed integer (int32)
+#   'I' = 4-byte unsigned integer (uint32)
+#   'h' = 2-byte signed integer (int16)
+#   'H' = 2-byte unsigned integer (uint16)
+#   'b' = 1-byte signed integer (int8)
+#   'B' = 1-byte unsigned integer (uint8)
+#   'f' = 4-byte float (float32)
+#   'd' = 8-byte float (float64)
+#
+# For complete reference see: https://docs.python.org/3/library/struct.html
+
 rtr_ids:
   - id: 0x100
-    freq: 20.0  # Frequency in Hz
+    freq: 10.0  # Frequency in Hz
     variables:
       - name: adc_ch1
         type: int32
+        format: ">i"  # Big-endian (>) 4-byte signed integer (i)
       - name: adc_ch2
         type: int32
+        format: ">i"  # Big-endian (>) 4-byte signed integer (i)
+  - id: 0x101
+    freq: 10.0  # Frequency in Hz
+    variables:
+      - name: adc_ch3
+        type: int32
+        format: ">i"  # Big-endian (>) 4-byte signed integer (i)
+      - name: adc_ch4
+        type: int32
+        format: ">i"  # Big-endian (>) 4-byte signed integer (i)
+  - id: 0x102
+    freq: 10.0  # Frequency in Hz
+    variables:
+      - name: adc_ch5
+        type: int32
+        format: ">i"  # Big-endian (>) 4-byte signed integer (i)
+      - name: adc_ch6
+        type: int32
+        format: ">i"  # Big-endian (>) 4-byte signed integer (i)
+  - id: 0x103
+    freq: 10.0  # Frequency in Hz
+    variables:
+      - name: adc_ch7
+        type: int32
+        format: ">i"  # Big-endian (>) 4-byte signed integer (i)
+      - name: adc_ch8
+        type: int32
+        format: ">i"  # Big-endian (>) 4-byte signed integer (i)
+  # Example of a CAN ID with mixed data types
+  - id: 0x201
+    freq: 0.0  # Frequency in Hz , 0 do not send
+    variables:
+      - name: temperature
+        type: float32
+        format: ">f"  # Big-endian (>) 4-byte float (f)
+      - name: status_flags
+        type: uint16
+        format: ">H"  # Big-endian (>) 2-byte unsigned short (H)
+      - name: device_id
+        type: uint8
+        format: ">B"  # Big-endian (>) 1-byte unsigned char (B)
+      - name: checksum
+        type: uint8
+        format: ">B"  # Big-endian (>) 1-byte unsigned char (B)
     
 
   
