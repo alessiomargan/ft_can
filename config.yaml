@@ -26,7 +26,7 @@ zmq:
 
 rtr_ids:
   - id: 0x100
-    freq: 10.0  # Frequency in Hz
+    freq: 200.0  # Frequency in Hz
     variables:
       - name: adc_ch1
         type: int32
@@ -35,7 +35,7 @@ rtr_ids:
         type: int32
         format: ">i"  # Big-endian (>) 4-byte signed integer (i)
   - id: 0x101
-    freq: 10.0  # Frequency in Hz
+    freq: 50.0  # Frequency in Hz
     variables:
       - name: adc_ch3
         type: int32
@@ -44,7 +44,7 @@ rtr_ids:
         type: int32
         format: ">i"  # Big-endian (>) 4-byte signed integer (i)
   - id: 0x102
-    freq: 10.0  # Frequency in Hz
+    freq: 20.0  # Frequency in Hz
     variables:
       - name: adc_ch5
         type: int32

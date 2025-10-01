@@ -154,52 +154,102 @@ class CANBusManager:
         return data_dict
     
     async def send_rtr_requests(self):
-        """Send RTR requests according to the configured frequencies"""
-        print("Starting RTR request sender")
+        """Send RTR requests using event-driven scheduling for precise timing"""
+        print("Starting event-driven RTR request sender")
         
-        # Keep track of when we last sent each RTR request
-        last_sent = {}
-        last_frequencies = {}
+        # Dictionary to store active tasks for each RTR ID
+        active_tasks = {}
         
-        # Initialize last_sent for all RTR IDs
-        for can_id, frequency in self.rtr_frequencies.items():
-            last_sent[can_id] = 0
-            last_frequencies[can_id] = frequency
-            print(f"Initial frequency for ID 0x{can_id:X}: {self.rtr_frequencies[can_id]}Hz")
-        
-        while True:
-            # Get the current time
-            current_time = time.time()
+        async def send_periodic_rtr(can_id, initial_frequency):
+            """Send RTR requests for a specific CAN ID at the given frequency"""
+            frequency = initial_frequency
+            print(f"Started periodic RTR task for ID 0x{can_id:X} at {frequency}Hz")
             
-            # For each RTR ID, check if it's time to send a request
-            for can_id, frequency in self.rtr_frequencies.items():
-                # Only print frequency changes, not every loop
-                if last_frequencies.get(can_id) != frequency:
-                    print(f"Frequency changed for ID 0x{can_id:X}: {last_frequencies.get(can_id)}Hz -> {frequency}Hz")
-                    last_frequencies[can_id] = frequency
-                
-                # If frequency is 0, don't send
-                if frequency <= 0:
-                    continue
+            while True:
+                try:
+                    # Check if frequency was updated
+                    current_frequency = self.rtr_frequencies.get(can_id, 0)
+                    if current_frequency != frequency:
+                        print(f"Frequency updated for ID 0x{can_id:X}: {frequency}Hz -> {current_frequency}Hz")
+                        frequency = current_frequency
                     
-                # Calculate time between requests based on frequency
-                interval = 1.0 / frequency
+                    # If frequency is 0 or negative, stop sending
+                    if frequency <= 0:
+                        print(f"Stopping RTR requests for ID 0x{can_id:X} (frequency: {frequency})")
+                        break
+                    
+                    # Calculate precise interval
+                    interval = 1.0 / frequency
+                    
+                    # Send RTR message
+                    rtr_msg = self.create_rtr_message({"id": f"0x{can_id:X}"})
+                    self.bus.send(rtr_msg)
+                    print(f"Sent RTR request for ID: 0x{can_id:X} at {frequency}Hz")
+                    
+                    # Sleep for the exact interval - no arbitrary delays!
+                    await asyncio.sleep(interval)
+                    
+                except asyncio.CancelledError:
+                    print(f"RTR task for ID 0x{can_id:X} was cancelled")
+                    break
+                except Exception as e:
+                    print(f"Error in RTR task for ID 0x{can_id:X}: {e}")
+                    # On error, wait a bit before retrying
+                    await asyncio.sleep(0.1)
+        
+        # Start initial tasks for all configured RTR IDs
+        for can_id, frequency in self.rtr_frequencies.items():
+            if frequency > 0:
+                task = asyncio.create_task(send_periodic_rtr(can_id, frequency))
+                active_tasks[can_id] = task
+                print(f"Created RTR task for ID 0x{can_id:X} with frequency {frequency}Hz")
+        
+        # Monitor for frequency changes and manage tasks
+        while True:
+            try:
+                # Check for new RTR IDs or frequency changes
+                for can_id, frequency in self.rtr_frequencies.items():
+                    # If there's no active task for this ID and frequency > 0, start one
+                    if can_id not in active_tasks and frequency > 0:
+                        print(f"Starting new RTR task for ID 0x{can_id:X} at {frequency}Hz")
+                        task = asyncio.create_task(send_periodic_rtr(can_id, frequency))
+                        active_tasks[can_id] = task
+                    
+                    # If there's an active task but frequency is 0, cancel it
+                    elif can_id in active_tasks and frequency <= 0:
+                        print(f"Cancelling RTR task for ID 0x{can_id:X} (frequency set to {frequency})")
+                        active_tasks[can_id].cancel()
+                        del active_tasks[can_id]
                 
-                # Check if it's time to send
-                if current_time - last_sent.get(can_id, 0) >= interval:
-                    try:
-                        # Create and send RTR message
-                        rtr_msg = self.create_rtr_message({"id": f"0x{can_id:X}"})
-                        self.bus.send(rtr_msg)
-                        last_sent[can_id] = current_time
-                        
-                        # Always print RTR request messages
-                        print(f"Sent RTR request for ID: 0x{can_id:X} at {frequency}Hz")
-                    except Exception as e:
-                        print(f"Error sending RTR message for ID 0x{can_id:X}: {e}")
-            
-            # Short sleep to prevent busy-waiting
-            await asyncio.sleep(0.01)
+                # Clean up completed tasks
+                completed_tasks = []
+                for can_id, task in active_tasks.items():
+                    if task.done():
+                        completed_tasks.append(can_id)
+                        try:
+                            await task  # Get any exception
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as e:
+                            print(f"RTR task for ID 0x{can_id:X} completed with error: {e}")
+                
+                # Remove completed tasks
+                for can_id in completed_tasks:
+                    del active_tasks[can_id]
+                    print(f"Cleaned up completed RTR task for ID 0x{can_id:X}")
+                
+                # Wait before checking again (this is the only sleep, and it's for management)
+                await asyncio.sleep(1.0)  # Check for changes every second
+                
+            except asyncio.CancelledError:
+                print("RTR request sender was cancelled")
+                # Cancel all active tasks
+                for task in active_tasks.values():
+                    task.cancel()
+                break
+            except Exception as e:
+                print(f"Error in RTR request manager: {e}")
+                await asyncio.sleep(1.0)
     
     async def receive_config_updates(self):
         """Receive configuration updates from the dashboard"""
@@ -273,98 +323,94 @@ class CANBusManager:
                 await asyncio.sleep(0.1)
     
     async def receive_can_messages(self):
-        """Receive and process CAN messages"""
-        print("Starting CAN message receiver loop")
+        """Receive and process CAN messages with event-driven approach"""
+        print("Starting event-driven CAN message receiver")
         message_count = 0
-        last_status_time = time.time()
         
         while True:
             try:
-                # Receive CAN message
-                can_msg = self.bus.recv(timeout=0.1)
+                # Use asyncio.to_thread for non-blocking CAN message reception
+                can_msg = await asyncio.to_thread(self.bus.recv, 0.01)  # Short timeout
                 
                 if can_msg is None:
-                    await asyncio.sleep(0.01)
+                    # No message received, yield control to other tasks
+                    await asyncio.sleep(0)  # Yield to event loop
                     continue
                 
                 message_count += 1
-                # Always log every message regardless of count
                 print(f"Received CAN message #{message_count}: ID=0x{can_msg.arbitration_id:X}")
                     
-                # Process the received message
-                if not can_msg.is_remote_frame:  # Process only data frames, not RTR requests
-                    try:
-                        # Get configuration for this CAN ID
-                        matching_config = None
-                        for rtr_config in self.config.get("rtr_ids", []):
-                            if parse_hex_id(rtr_config["id"]) == can_msg.arbitration_id:
-                                matching_config = rtr_config
-                                break
-                        
-                        if matching_config:
-                            # Process data using the same approach for both simulation and hardware modes
-                            received_data = {}
-                            current_offset = 0
-                            
-                            for var in matching_config.get("variables", []):
-                                var_name = var["name"]
-                                var_format = var.get("format", ">i")  # Default to big-endian int32
-                                format_size = struct.calcsize(var_format)
-                                
-                                try:
-                                    if current_offset + format_size <= len(can_msg.data):
-                                        value = struct.unpack(
-                                            var_format,
-                                            can_msg.data[current_offset:current_offset+format_size]
-                                        )[0]
-                                        received_data[var_name] = value
-                                        current_offset += format_size
-                                    else:
-                                        print(f"Not enough data for {var_name}: need {format_size} bytes, have {len(can_msg.data) - current_offset}")
-                                except struct.error as e:
-                                    print(f"Error unpacking {var_name} with format {var_format}: {e}")
-                                except Exception as e:
-                                    print(f"Unexpected error processing {var_name}: {e}")
-                                    import traceback
-                                    traceback.print_exc()
-                        else:
-                            print(f"No matching config for CAN ID 0x{can_msg.arbitration_id:X}")
-                            received_data = {}
-                        
-                        # Update sensor data and publish it
-                        if received_data:
-                            self.sensor_data.update(received_data)
-                            
-                            # Send the updated data via ZMQ
-                            await self.data_publisher.send_multipart([
-                                f"CAN_{can_msg.arbitration_id:X}".encode(),  # Topic with ID in hex format
-                                json.dumps(received_data).encode("utf8")     # Data
-                            ])
-                            
-                            # Also send all accumulated sensor data
-                            await self.data_publisher.send_multipart([
-                                b"SENSORS",  # Topic for all sensor data
-                                json.dumps(self.sensor_data).encode("utf8")
-                            ])
-                            
-                            # Always print the data for every message
-                            print(f"Data for ID 0x{can_msg.arbitration_id:X}: {received_data}")
-                        else:
-                            print(f"Warning: Received CAN message for ID 0x{can_msg.arbitration_id:X} but no data was extracted")
+                # Process the received message (non-RTR frames only)
+                if not can_msg.is_remote_frame:
+                    # Process message immediately without any delays
+                    received_data = await self.process_can_message(can_msg)
                     
-                    except Exception as e:
-                        print(f"Error processing CAN message data: {e}")
-                        import traceback
-                        traceback.print_exc()
+                    if received_data:
+                        # Update sensor data and publish immediately
+                        self.sensor_data.update(received_data)
+                        
+                        # Publish via ZMQ without delay
+                        await self.data_publisher.send_multipart([
+                            f"CAN_{can_msg.arbitration_id:X}".encode(),
+                            json.dumps(received_data).encode("utf8")
+                        ])
+                        
+                        await self.data_publisher.send_multipart([
+                            b"SENSORS",
+                            json.dumps(self.sensor_data).encode("utf8")
+                        ])
+                        
+                        print(f"Data for ID 0x{can_msg.arbitration_id:X}: {received_data}")
+                    else:
+                        print(f"Warning: Received CAN message for ID 0x{can_msg.arbitration_id:X} but no data was extracted")
                     
-            except (asyncio.CancelledError, KeyboardInterrupt) as e:
-                print(f"Message reception interrupted: {e}")
-                raise
+            except asyncio.CancelledError:
+                print("CAN message reception was cancelled")
+                break
             except Exception as e:
                 print(f"Error processing CAN message: {e}")
                 import traceback
                 traceback.print_exc()
-                await asyncio.sleep(0.1)
+                # Brief pause on error, but not arbitrary
+                await asyncio.sleep(0.01)
+
+    async def process_can_message(self, can_msg):
+        """Process CAN message data asynchronously"""
+        # Find matching configuration
+        matching_config = None
+        for rtr_config in self.config.get("rtr_ids", []):
+            if parse_hex_id(rtr_config["id"]) == can_msg.arbitration_id:
+                matching_config = rtr_config
+                break
+        
+        if not matching_config:
+            return {}
+        
+        # Process data using configuration
+        received_data = {}
+        current_offset = 0
+        
+        for var in matching_config.get("variables", []):
+            var_name = var["name"]
+            var_format = var.get("format", ">i")  # Default to big-endian int32
+            format_size = struct.calcsize(var_format)
+            
+            try:
+                if current_offset + format_size <= len(can_msg.data):
+                    value = struct.unpack(
+                        var_format,
+                        can_msg.data[current_offset:current_offset+format_size]
+                    )[0]
+                    received_data[var_name] = value
+                    current_offset += format_size
+                else:
+                    print(f"Not enough data for {var_name}: need {format_size} bytes, have {len(can_msg.data) - current_offset}")
+            except struct.error as e:
+                print(f"Error unpacking {var_name} with format {var_format}: {e}")
+            except Exception as e:
+                print(f"Unexpected error processing {var_name}: {e}")
+        
+        return received_data
     
     async def run(self):
         """Run the CAN bus manager with all its tasks"""
