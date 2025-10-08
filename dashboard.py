@@ -12,7 +12,8 @@ import time
 from collections import deque, defaultdict
 
 # Import utilities
-from utils import load_config, parse_hex_id, get_address, get_config_address
+from utils import load_config, parse_hex_id, get_address, get_config_pub_input
+from shared_data import set_config_publisher
 
 # Global variables
 config = load_config()
@@ -41,16 +42,24 @@ for rtr in rtr_configs:
 # ZMQ setup
 context = zmq.Context()
 
-# Publisher for config updates
+# Publisher for config updates - connect to broker input
 config_publisher = context.socket(zmq.PUB)
 config_publisher.setsockopt(zmq.LINGER, 0)
-config_address = get_config_address()
 try:
-    config_publisher.bind(config_address)
-    print(f"Config publisher bound to {config_address}")
+    config_input = get_config_pub_input()
+    config_publisher.connect(config_input)
+    # Expose to shared_data for other modules that expect it
+    set_config_publisher(config_publisher)
+    print(f"Config publisher connected to broker input at {config_input}")
 except Exception as e:
-    print(f"ERROR: Failed to bind config publisher: {e}")
+    print(f"ERROR: Failed to connect config publisher to broker input: {e}")
     config_publisher = None
+
+# Cache last-sent frequencies per RTR (keyed by hex id string) so we only
+# transmit CONFIG updates when something actually changes.
+last_sent_freqs = {}
+# Track last-applied frequencies as reported by publisher (CONFIG_ACK)
+last_applied_freqs = {}
 
 # Subscriber for data
 data_subscriber = context.socket(zmq.SUB)
@@ -64,6 +73,19 @@ try:
 except Exception as e:
     print(f"ERROR: Failed to connect data subscriber: {e}")
     data_subscriber = None
+
+# Subscriber for CONFIG_ACKs so we can show applied frequencies
+config_ack_sub = context.socket(zmq.SUB)
+config_ack_sub.setsockopt(zmq.LINGER, 0)
+config_ack_sub.setsockopt(zmq.RCVTIMEO, 100)
+try:
+    # CONFIG_ACKs are published on the canonical config port (via broker)
+    config_ack_sub.connect(get_config_address())
+    config_ack_sub.subscribe(b"CONFIG_ACK")
+    print(f"Config ACK subscriber connected to {get_config_address()}")
+except Exception as e:
+    print(f"ERROR: Failed to connect CONFIG_ACK subscriber: {e}")
+    config_ack_sub = None
 
 # Data reception thread
 def receive_data():
@@ -121,6 +143,33 @@ def receive_data():
             print(f"Error in data reception thread: {e}")
             time.sleep(0.1)
 
+
+def receive_config_acks():
+    if not config_ack_sub:
+        return
+    print("Starting CONFIG_ACK reception thread")
+    while True:
+        try:
+            topic, data = config_ack_sub.recv_multipart()
+            topic_str = topic.decode('utf8')
+            if topic_str == 'CONFIG_ACK':
+                ack = json.loads(data.decode('utf8'))
+                rtr_id = ack.get('id')
+                freq = ack.get('frequency')
+                if rtr_id:
+                    last_applied_freqs[rtr_id] = freq
+                    print(f"Received CONFIG_ACK: {ack}")
+        except zmq.error.Again:
+            time.sleep(0.05)
+        except Exception as e:
+            print(f"Error in CONFIG_ACK reception thread: {e}")
+            time.sleep(0.1)
+
+
+# Start config ack reception thread
+config_ack_thread = threading.Thread(target=receive_config_acks, daemon=True)
+config_ack_thread.start()
+
 # Start the data reception thread
 data_thread = threading.Thread(target=receive_data, daemon=True)
 data_thread.start()
@@ -147,6 +196,7 @@ app.layout = html.Div([
                         marks={i: str(i) for i in range(0, 51, 10)}
                     ),
                     html.Div(id=f'freq-value-{rtr["id"]}'),
+                    html.Div(id=f'applied-value-{rtr["id"]}', children="Applied: N/A")
                 ]),
                 html.Div([
                     dcc.Checklist(
@@ -222,6 +272,23 @@ for rtr in rtr_configs:
 def update_interval(value):
     return value
 
+
+# Callback to update applied frequency display fields (polling every second from last_applied_freqs)
+@app.callback(
+    [Output(f'applied-value-{rtr["id"]}', 'children') for rtr in rtr_configs],
+    [Input('interval-component', 'n_intervals')]
+)
+def update_applied_values(n):
+    out = []
+    for rtr in rtr_configs:
+        rtr_id_hex = f"0x{parse_hex_id(rtr['id']):X}"
+        val = last_applied_freqs.get(rtr_id_hex)
+        if val is None:
+            out.append("Applied: N/A")
+        else:
+            out.append(f"Applied: {val} Hz")
+    return out
+
 # Main graph update callback
 @app.callback(
     Output('can-graph', 'figure'),
@@ -259,23 +326,36 @@ def update_graph(n_intervals, display_window, *args):
         frequency = frequencies[i]
         enabled = enabled_states[i]
         
-        # Send frequency update if enabled
         # Check if enabled is a list and contains 'enabled'
         is_enabled = enabled and isinstance(enabled, list) and 'enabled' in enabled
-        
-        if is_enabled and config_publisher:
-            update_data = {
-                'type': 'rtr_frequency_update',
-                'id': rtr_id,
-                'frequency': frequency
-            }
-            try:
-                config_publisher.send_multipart([
-                    b"CONFIG", 
-                    json.dumps(update_data).encode("utf8")
-                ])
-            except Exception as e:
-                print(f"Error sending frequency update: {e}")
+
+        # Always send a frequency update when we have a config publisher.
+        # If the control is disabled, explicitly send frequency=0 so the
+        # publisher knows to stop sending RTR requests for that ID.
+        if config_publisher:
+            freq_to_send = frequency if is_enabled else 0
+            # Always send the ID as a hex string (e.g. "0x101") to avoid
+            # ambiguity between YAML-parsed integers and intended CAN ID strings.
+            rtr_id_hex = f"0x{parse_hex_id(rtr_id):X}"
+
+            # Only send when something changed (frequency or enabled state)
+            prev = last_sent_freqs.get(rtr_id_hex)
+            if prev != freq_to_send:
+                update_data = {
+                    'type': 'rtr_frequency_update',
+                    'id': rtr_id_hex,
+                    'frequency': freq_to_send
+                }
+                try:
+                    # Debug print so we can trace what is being sent from the dashboard
+                    print(f"Sending CONFIG update: {update_data}")
+                    config_publisher.send_multipart([
+                        b"CONFIG",
+                        json.dumps(update_data).encode("utf8")
+                    ])
+                    last_sent_freqs[rtr_id_hex] = freq_to_send
+                except Exception as e:
+                    print(f"Error sending frequency update: {e}")
     
     # Generate graph
     traces = []

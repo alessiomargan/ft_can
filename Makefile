@@ -5,7 +5,9 @@ SHELL := /usr/bin/env bash
 #######
 
 .DEFAULT_GOAL := help
-.PHONY: help mk-conda-env rm-conda-env up-conda-env run run-app run-backend run-pub run-sub run-both run-app-pub test clean monitor log kill kill-app kill-backend kill-pub debug-memory debug-clear-memory sim-on sim-off
+.PHONY: help mk-conda-env rm-conda-env up-conda-env run run-app run-backend run-pub run-sub run-both run-app-pub test clean monitor log setup-can0 kill kill-app kill-backend kill-pub debug-memory debug-clear-memory sim-on sim-off
+# Supervised start/stop helpers
+.PHONY: start-supervised stop-supervised status-supervised
 
 debug-memory:  ## Check the status of shared memory buffers
 	@echo "Checking shared memory status..."
@@ -24,6 +26,13 @@ sim-off:  ## Disable simulation mode (use real hardware)
 	@echo "Disabling simulation mode..."
 	@sed -i 's/simulation_mode:.*/simulation_mode: false  # Set to true to simulate CAN data without hardware, false for real hardware/g' config.yaml
 	@echo "Simulation mode is now OFF. Real CAN hardware will be used."
+
+setup-can0:  ## Set the `can0` network interface to 250 kbps (requires sudo)
+	@echo "Configuring can0 interface to 250 kbps..."
+	@sudo ip link set can0 down || true
+	@sudo ip link set can0 type can bitrate 250000
+	@sudo ip link set can0 up
+	@echo "can0 is up at 250 kbps"
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
@@ -61,13 +70,16 @@ up-conda-env:  ## Update the conda environment with any changes in the yml file
 
 run: kill  ## Run complete system: publisher + backend + dashboard (recommended)
 	@echo "Starting complete CAN system..."
-	@echo "1. Starting publisher (for RTR requests)..."
+	@echo "1. Starting ZMQ broker..."
+	$(CONDA_ACTIVATE) && python zmq_broker.py & \
+	sleep 1 && \
+	@echo "2. Starting publisher (for RTR requests)..." && \
 	$(CONDA_ACTIVATE) && python async_pub.py & \
 	sleep 2 && \
-	echo "2. Starting data collection backend..." && \
+	@echo "3. Starting data collection backend..." && \
 	python async_sub.py & \
 	sleep 2 && \
-	echo "3. Starting dashboard (for visualization and RTR frequency control)..." && \
+	@echo "4. Starting dashboard (for visualization and RTR frequency control)..." && \
 	python dashboard.py
 
 run-backend: kill-backend  ## Run the CAN data collection backend
@@ -86,10 +98,15 @@ run-pub: kill-pub  ## Run the CAN publisher service with RTR handling
 run-app-pub: kill-app kill-pub  ## Run both publisher and dashboard (most common use case)
 	@echo "Step 1: Cleaning up any existing ZMQ sockets..."
 	-$(CONDA_ACTIVATE) && python -c "import zmq; ctx=zmq.Context(); ctx.term()" 2>/dev/null || true
-	@echo "Step 2: Starting CAN publisher service with RTR handling..."
+	@echo "Step 1: Cleaning up any existing ZMQ sockets..."
+	-$(CONDA_ACTIVATE) && python -c "import zmq; ctx=zmq.Context(); ctx.term()" 2>/dev/null || true
+	@echo "Step 2: Starting ZMQ broker..."
+	$(CONDA_ACTIVATE) && python zmq_broker.py & \
+	sleep 1 && \
+	@echo "Step 3: Starting CAN publisher service with RTR handling..." && \
 	$(CONDA_ACTIVATE) && python async_pub.py & \
 	sleep 3 && \
-	echo "Step 3: Starting CAN bus dashboard application (controls RTR frequencies)..." && \
+	echo "Step 4: Starting CAN bus dashboard application (controls RTR frequencies)..." && \
 	$(CONDA_ACTIVATE) && python dashboard.py
 
 run-both: kill  ## Run using the unified run.py script (backend + dashboard)
@@ -132,6 +149,19 @@ kill:  ## Kill all running instances of the app
 	-pkill -f "python.*async_sub.py" || true
 	-pkill -f "python.*dashboard.py" || true
 	@echo "Done killing all processes"
+
+start-supervised:  ## Start broker, publisher, backend and dashboard under pidfile/log supervision
+	@echo "Starting supervised services (logs -> logs/*.log, pids -> run/*.pid)"
+	@mkdir -p logs run scripts || true
+	$(CONDA_ACTIVATE) && bash scripts/start_services.sh
+
+stop-supervised:  ## Stop supervised services started by start-supervised
+	@echo "Stopping supervised services (using run/*.pid)..."
+	bash scripts/stop_services.sh || true
+
+status-supervised:  ## Show status of supervised services
+	@printf "%-8s %-8s %s\n" "SERVICE" "PID" "LOG"
+	@if [ -d run ]; then for f in run/*.pid 2>/dev/null || true; do svc=$$(basename $$f .pid); pid=$$(cat $$f 2>/dev/null || echo ""); log="logs/$$svc.log"; printf "%-8s %-8s %s\n" $$svc $$pid $$log; done; fi
 
 kill-app:  ## Kill only the dashboard app
 	@echo "Killing dashboard app instances..."

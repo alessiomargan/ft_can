@@ -24,6 +24,24 @@ def get_config_address():
     port = config.get('zmq', {}).get('config_port', 10102)
     return f"{protocol}://{address}:{port}"
 
+def get_data_pub_input():
+    """Get the data publisher input address (where publishers should connect)
+    This is the broker-facing input port (data_port + 10 by default)."""
+    config = load_config()
+    protocol = "tcp"
+    address = "127.0.0.1"
+    base = config.get('zmq', {}).get('data_port', 10101)
+    return f"{protocol}://{address}:{base + 10}"
+
+def get_config_pub_input():
+    """Get the config publisher input address (where dashboards should connect)
+    This is the broker-facing input port (config_port + 10 by default)."""
+    config = load_config()
+    protocol = "tcp"
+    address = "127.0.0.1"
+    base = config.get('zmq', {}).get('config_port', 10102)
+    return f"{protocol}://{address}:{base + 10}"
+
 def is_port_in_use(port):
     """Check if a port is in use"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

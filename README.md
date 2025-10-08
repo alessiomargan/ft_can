@@ -122,6 +122,31 @@ make kill       # Kill everything
 - **Shared State**: Clean interface for data sharing between components
 - **Unified Backend**: `async_sub.py` serves as both a simple subscriber and full backend
 
+## ZMQ Broker (new)
+
+To avoid bind/connect ordering issues and to fully decouple publishers and subscribers, this repository now includes a small ZMQ broker forwarder device:
+
+- `zmq_broker.py` — run this process first (or via the Makefile) and it will bind the canonical data and config ports. Publishers connect to the broker input ports and subscribers connect to the canonical ports.
+
+Port layout (defaults from `config.yaml`):
+
+- Data canonical (subscribers connect): tcp://127.0.0.1:10101
+- Data publisher input (publishers connect): tcp://127.0.0.1:10111
+- Config canonical (subscribers/async_pub connect): tcp://127.0.0.1:10102
+- Config publisher input (dashboards connect): tcp://127.0.0.1:10112
+
+Makefile targets were updated to start the broker automatically for common developer flows. If you run components manually, start the broker first:
+
+```bash
+# Start the broker in background
+python zmq_broker.py &
+
+# Then start the publisher and dashboard in any order
+python async_pub.py
+python dashboard.py
+```
+
+This broker is intentionally minimal (uses zmq.proxy) and runs with low overhead.
 ## Troubleshooting
 
 ### No Data in Dashboard

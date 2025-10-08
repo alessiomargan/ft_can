@@ -27,7 +27,10 @@ class CANBusManager:
         
         # Dictionary to store sensor values
         self.sensor_data = {}
-        
+
+        # Active RTR tasks keyed by CAN ID
+        self.active_tasks = {}
+
         # Get simulation mode setting from config
         self.simulation_mode = self.config.get("simulation_mode", False)
         
@@ -87,9 +90,20 @@ class CANBusManager:
         """Set up the ZMQ publisher for data"""
         try:
             self.data_publisher = zmq.asyncio.Context().socket(zmq.PUB)
-            data_address = get_address()
-            self.data_publisher.bind(data_address)
-            print(f"Publisher bound to {data_address}")
+            # Connect to broker publisher input so broker can forward to subscribers
+            from utils import get_data_pub_input
+            data_pub_input = get_data_pub_input()
+            self.data_publisher.connect(data_pub_input)
+            print(f"Publisher connected to broker input at {data_pub_input}")
+            # Also create a config publisher so we can send CONFIG_ACK messages
+            try:
+                self.config_publisher = zmq.asyncio.Context().socket(zmq.PUB)
+                from utils import get_config_pub_input
+                config_pub_input = get_config_pub_input()
+                self.config_publisher.connect(config_pub_input)
+                print(f"Config publisher (ACK) connected to broker input at {config_pub_input}")
+            except Exception as e:
+                print(f"Warning: failed to create config publisher for ACKs: {e}")
             return True
         except zmq.error.ZMQError as e:
             print(f"ERROR: Failed to bind data publisher to {get_address()}")
@@ -156,100 +170,80 @@ class CANBusManager:
     async def send_rtr_requests(self):
         """Send RTR requests using event-driven scheduling for precise timing"""
         print("Starting event-driven RTR request sender")
-        
-        # Dictionary to store active tasks for each RTR ID
-        active_tasks = {}
-        
-        async def send_periodic_rtr(can_id, initial_frequency):
-            """Send RTR requests for a specific CAN ID at the given frequency"""
-            frequency = initial_frequency
-            print(f"Started periodic RTR task for ID 0x{can_id:X} at {frequency}Hz")
-            
-            while True:
-                try:
-                    # Check if frequency was updated
+        async def send_periodic_rtr(can_id):
+            """Send RTR requests for a specific CAN ID reading frequency dynamically"""
+            print(f"Started periodic RTR task for ID 0x{can_id:X}")
+            try:
+                while True:
+                    # Always read current frequency from the shared dict
                     current_frequency = self.rtr_frequencies.get(can_id, 0)
-                    if current_frequency != frequency:
-                        print(f"Frequency updated for ID 0x{can_id:X}: {frequency}Hz -> {current_frequency}Hz")
-                        frequency = current_frequency
-                    
-                    # If frequency is 0 or negative, stop sending
-                    if frequency <= 0:
-                        print(f"Stopping RTR requests for ID 0x{can_id:X} (frequency: {frequency})")
+                    if current_frequency <= 0:
+                        print(f"Stopping RTR requests for ID 0x{can_id:X} (frequency: {current_frequency})")
                         break
-                    
-                    # Calculate precise interval
-                    interval = 1.0 / frequency
-                    
+
+                    interval = 1.0 / current_frequency
+
                     # Send RTR message
-                    rtr_msg = self.create_rtr_message({"id": f"0x{can_id:X}"})
-                    self.bus.send(rtr_msg)
-                    print(f"Sent RTR request for ID: 0x{can_id:X} at {frequency}Hz")
-                    
-                    # Sleep for the exact interval - no arbitrary delays!
+                    try:
+                        rtr_msg = self.create_rtr_message({"id": f"0x{can_id:X}"})
+                        self.bus.send(rtr_msg)
+                        print(f"Sent RTR request for ID: 0x{can_id:X} at {current_frequency}Hz")
+                    except Exception as e:
+                        print(f"Error sending RTR for ID 0x{can_id:X}: {e}")
+
+                    # Sleep for the interval (cancellable)
                     await asyncio.sleep(interval)
-                    
-                except asyncio.CancelledError:
-                    print(f"RTR task for ID 0x{can_id:X} was cancelled")
-                    break
-                except Exception as e:
-                    print(f"Error in RTR task for ID 0x{can_id:X}: {e}")
-                    # On error, wait a bit before retrying
-                    await asyncio.sleep(0.1)
-        
+            except asyncio.CancelledError:
+                print(f"RTR task for ID 0x{can_id:X} was cancelled")
+
         # Start initial tasks for all configured RTR IDs
         for can_id, frequency in self.rtr_frequencies.items():
-            if frequency > 0:
-                task = asyncio.create_task(send_periodic_rtr(can_id, frequency))
-                active_tasks[can_id] = task
+            if frequency > 0 and can_id not in self.active_tasks:
+                task = asyncio.create_task(send_periodic_rtr(can_id))
+                self.active_tasks[can_id] = task
                 print(f"Created RTR task for ID 0x{can_id:X} with frequency {frequency}Hz")
-        
+
         # Monitor for frequency changes and manage tasks
         while True:
             try:
-                # Check for new RTR IDs or frequency changes
-                for can_id, frequency in self.rtr_frequencies.items():
-                    # If there's no active task for this ID and frequency > 0, start one
-                    if can_id not in active_tasks and frequency > 0:
+                # Start or cancel tasks based on current rtr_frequencies
+                for can_id, frequency in list(self.rtr_frequencies.items()):
+                    if can_id not in self.active_tasks and frequency > 0:
                         print(f"Starting new RTR task for ID 0x{can_id:X} at {frequency}Hz")
-                        task = asyncio.create_task(send_periodic_rtr(can_id, frequency))
-                        active_tasks[can_id] = task
-                    
-                    # If there's an active task but frequency is 0, cancel it
-                    elif can_id in active_tasks and frequency <= 0:
+                        task = asyncio.create_task(send_periodic_rtr(can_id))
+                        self.active_tasks[can_id] = task
+                    elif can_id in self.active_tasks and frequency <= 0:
                         print(f"Cancelling RTR task for ID 0x{can_id:X} (frequency set to {frequency})")
-                        active_tasks[can_id].cancel()
-                        del active_tasks[can_id]
-                
+                        self.active_tasks[can_id].cancel()
+                        del self.active_tasks[can_id]
+
                 # Clean up completed tasks
                 completed_tasks = []
-                for can_id, task in active_tasks.items():
+                for can_id, task in list(self.active_tasks.items()):
                     if task.done():
                         completed_tasks.append(can_id)
                         try:
-                            await task  # Get any exception
+                            await task
                         except asyncio.CancelledError:
                             pass
                         except Exception as e:
                             print(f"RTR task for ID 0x{can_id:X} completed with error: {e}")
-                
-                # Remove completed tasks
+
                 for can_id in completed_tasks:
-                    del active_tasks[can_id]
-                    print(f"Cleaned up completed RTR task for ID 0x{can_id:X}")
-                
-                # Wait before checking again (this is the only sleep, and it's for management)
-                await asyncio.sleep(1.0)  # Check for changes every second
-                
+                    if can_id in self.active_tasks:
+                        del self.active_tasks[can_id]
+                        print(f"Cleaned up completed RTR task for ID 0x{can_id:X}")
+
+                await asyncio.sleep(0.5)  # Check for changes twice per second
+
             except asyncio.CancelledError:
                 print("RTR request sender was cancelled")
-                # Cancel all active tasks
-                for task in active_tasks.values():
+                for task in list(self.active_tasks.values()):
                     task.cancel()
                 break
             except Exception as e:
                 print(f"Error in RTR request manager: {e}")
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
     
     async def receive_config_updates(self):
         """Receive configuration updates from the dashboard"""
@@ -297,16 +291,35 @@ class CANBusManager:
                     if config_update.get('type') == 'rtr_frequency_update':
                         rtr_id_str = config_update.get('id')
                         frequency = config_update.get('frequency')
-                        
-                        if rtr_id_str and frequency:
+
+                        # Accept frequency=0 (falsy), so check for None specifically
+                        if rtr_id_str is not None and frequency is not None:
+                            # Parse the ID (supports hex strings like '0x101')
                             rtr_id = parse_hex_id(rtr_id_str)
                             # Get old frequency for comparison
                             old_freq = self.rtr_frequencies.get(rtr_id, "not set")
-                            
+
                             # Update the frequency in our dictionary
                             self.rtr_frequencies[rtr_id] = frequency
+
+                            print(f"Received CONFIG update raw id={rtr_id_str}, parsed id=0x{rtr_id:X}, frequency={frequency}")
                             print(f"Updated RTR frequency for {rtr_id_str} (ID: 0x{rtr_id:X}) from {old_freq} to {frequency}Hz")
                             print(f"Updated frequencies dict: {self.rtr_frequencies}")
+                            # Send an ACK back on CONFIG_ACK topic so dashboards can confirm
+                            try:
+                                if hasattr(self, 'config_publisher') and self.config_publisher:
+                                    ack = {
+                                        'type': 'rtr_frequency_applied',
+                                        'id': f"0x{rtr_id:X}",
+                                        'frequency': frequency
+                                    }
+                                    await self.config_publisher.send_multipart([
+                                        b"CONFIG_ACK",
+                                        json.dumps(ack).encode('utf8')
+                                    ])
+                                    print(f"Sent CONFIG_ACK for 0x{rtr_id:X}: {ack}")
+                            except Exception as e:
+                                print(f"Error sending CONFIG_ACK: {e}")
             
             except asyncio.TimeoutError:
                 # Always print a heartbeat message
@@ -338,7 +351,13 @@ class CANBusManager:
                     continue
                 
                 message_count += 1
-                print(f"Received CAN message #{message_count}: ID=0x{can_msg.arbitration_id:X}")
+                print(f"Received CAN message #{message_count}: ID=0x{can_msg.arbitration_id:X} (len={len(getattr(can_msg,'data',b''))})")
+                try:
+                    raw_hex = can_msg.data.hex() if hasattr(can_msg, 'data') else ''
+                except Exception:
+                    raw_hex = ''
+                if raw_hex:
+                    print(f"Raw CAN data: 0x{raw_hex}")
                     
                 # Process the received message (non-RTR frames only)
                 if not can_msg.is_remote_frame:
