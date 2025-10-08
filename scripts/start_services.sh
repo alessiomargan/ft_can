@@ -7,6 +7,9 @@ RUN_DIR="$ROOT_DIR/run"
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 CONDA_ACTIVATE="source $(conda info --base)/etc/profile.d/conda.sh && conda activate ft-can"
 
+# If FORCE=1 is set in the environment, ignore/remove existing pidfiles and start services anyway
+FORCE=${FORCE:-0}
+
 start_service() {
   name=$1
   shift
@@ -14,12 +17,18 @@ start_service() {
   pidfile="$RUN_DIR/${name}.pid"
   logfile="$LOG_DIR/${name}.log"
   if [ -f "$pidfile" ]; then
-    if kill -0 $(cat "$pidfile") 2>/dev/null; then
-      echo "$name already running (pid $(cat $pidfile)), skipping"
-      return
-    else
-      echo "Stale pidfile for $name, removing"
+    if [ "$FORCE" = "1" ]; then
+      echo "FORCE=1: removing existing pidfile for $name -> $pidfile"
       rm -f "$pidfile"
+    else
+      pid=$(cat "$pidfile" 2>/dev/null || echo "")
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "$name already running (pid $pid), skipping"
+        return
+      else
+        echo "Stale pidfile for $name, removing"
+        rm -f "$pidfile"
+      fi
     fi
   fi
   echo "Starting $name -> $logfile"

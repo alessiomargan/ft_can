@@ -150,10 +150,11 @@ kill:  ## Kill all running instances of the app
 	-pkill -f "python.*dashboard.py" || true
 	@echo "Done killing all processes"
 
-start-supervised:  ## Start broker, publisher, backend and dashboard under pidfile/log supervision
+start-supervised:  ## Start broker, publisher, backend and dashboard under pidfile/log supervision (use FORCE=1 to ignore pidfiles)
 	@echo "Starting supervised services (logs -> logs/*.log, pids -> run/*.pid)"
 	@mkdir -p logs run scripts || true
-	$(CONDA_ACTIVATE) && bash scripts/start_services.sh
+	@echo "Note: to ignore stale pidfiles run: make start-supervised FORCE=1"
+	$(CONDA_ACTIVATE) && FORCE=$${FORCE:-0} bash scripts/start_services.sh
 
 stop-supervised:  ## Stop supervised services started by start-supervised
 	@echo "Stopping supervised services (using run/*.pid)..."

@@ -40,3 +40,11 @@ env/
 *.dat
 
 # No exceptions for CSV files
+
+# Runtime artifacts
+run/
+logs/
+*.pid
+
+# Workspace files
+*.code-workspace
