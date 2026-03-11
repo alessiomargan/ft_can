@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 #######
 
 .DEFAULT_GOAL := help
-.PHONY: help mk-conda-env rm-conda-env up-conda-env run run-app run-backend run-pub run-sub run-both run-app-pub test clean monitor log setup-can0 kill kill-app kill-backend kill-pub debug-memory debug-clear-memory sim-on sim-off
+.PHONY: help mk-conda-env rm-conda-env up-conda-env run run-app run-backend run-pub run-sub run-both run-app-pub run-loader test clean monitor log setup-can0 kill kill-app kill-backend kill-pub debug-memory debug-clear-memory sim-on sim-off
 # Supervised start/stop helpers
 .PHONY: start-supervised stop-supervised status-supervised
 
@@ -114,6 +114,15 @@ run-both: kill  ## Run using the unified run.py script (backend + dashboard)
 	$(CONDA_ACTIVATE) && python async_pub.py & \
 	sleep 2 && \
 	python run.py both
+
+run-loader:  ## Run CAN bootloader host (usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 BUSTYPE=socketcan BITRATE=250000])
+	@if [ -z "$(FILE)" ]; then \
+		echo "Error: FILE is required"; \
+		echo "Usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 BUSTYPE=socketcan BITRATE=250000]"; \
+		exit 1; \
+	fi
+	@echo "Running CAN loader for $(FILE)..."
+	$(CONDA_ACTIVATE) && python can_loader.py "$(FILE)" --slot $${SLOT:-0} --channel $${CHANNEL:-can0} --bustype $${BUSTYPE:-socketcan} --bitrate $${BITRATE:-250000}
 
 test:  ## Test the modular architecture
 	@echo "Testing modular architecture..."
