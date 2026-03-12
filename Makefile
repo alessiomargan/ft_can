@@ -115,14 +115,14 @@ run-both: kill  ## Run using the unified run.py script (backend + dashboard)
 	sleep 2 && \
 	python run.py both
 
-run-loader:  ## Run CAN bootloader host (usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 BUSTYPE=socketcan BITRATE=250000])
+run-loader:  ## Run CAN bootloader host (usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 interface=socketcan BITRATE=250000])
 	@if [ -z "$(FILE)" ]; then \
 		echo "Error: FILE is required"; \
-		echo "Usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 BUSTYPE=socketcan BITRATE=250000]"; \
+		echo "Usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 INTERFACE=socketcan BITRATE=250000]"; \
 		exit 1; \
 	fi
 	@echo "Running CAN loader for $(FILE)..."
-	$(CONDA_ACTIVATE) && python can_loader.py "$(FILE)" --slot $${SLOT:-0} --channel $${CHANNEL:-can0} --bustype $${BUSTYPE:-socketcan} --bitrate $${BITRATE:-250000}
+	$(CONDA_ACTIVATE) && python can_loader.py "$(FILE)" --slot $${SLOT:-0} --channel $${CHANNEL:-can0} --interface $${INTERFACE:-socketcan} --bitrate $${BITRATE:-250000}
 
 test:  ## Test the modular architecture
 	@echo "Testing modular architecture..."

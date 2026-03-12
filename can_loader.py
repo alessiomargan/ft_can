@@ -99,8 +99,8 @@ class Log:
 
 
 class CanLoader:
-    def __init__(self, channel, bustype, bitrate):
-        self.bus = can.interface.Bus(channel=channel, bustype=bustype, bitrate=bitrate)
+    def __init__(self, channel, interface, bitrate):
+        self.bus = can.interface.Bus(channel=channel, interface=interface, bitrate=bitrate)
         self.reader = can.AsyncBufferedReader()
         self.notifier = can.Notifier(self.bus, [self.reader])
         self.loop = asyncio.get_event_loop()
@@ -368,13 +368,13 @@ async def main():
     parser = argparse.ArgumentParser(description="CAN bootloader host script for VA416xx.")
     parser.add_argument("file", help="Path to the binary file to upload.")
     parser.add_argument("--channel", default="can0", help="CAN channel (e.g., can0, vcan0).")
-    parser.add_argument("--bustype", default="socketcan", help="CAN bus type (e.g., socketcan, pcan, vector).")
+    parser.add_argument("--interface", default="socketcan", help="CAN bus type (e.g., socketcan, pcan, vector).")
     parser.add_argument("--bitrate", type=int, default=250000, help="CAN bitrate.")
     parser.add_argument("--slot", type=int, default=0, choices=[0, 1], help="Application slot (0 for App A, 1 for App B).")
     
     args = parser.parse_args()
 
-    loader = CanLoader(channel=args.channel, bustype=args.bustype, bitrate=args.bitrate)
+    loader = CanLoader(channel=args.channel, interface=args.interface, bitrate=args.bitrate)
     
     try:
         await loader.upload_file(args.file, args.slot)
