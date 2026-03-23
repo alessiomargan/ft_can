@@ -21,9 +21,9 @@ The application has been modularized into separate components:
 - `dashboard.py`: Web-based visualization frontend with Dash/Plotly
 - `shared_data.py`: Shared data structures and configuration between components
 - `async_pub.py`: CAN bus RTR message publisher using asyncio and ZMQ
+- `zmq_broker.py`: ZMQ forwarder for data and config channels
 - `utils.py`: Shared utility functions
 - `config.yaml`: Configuration for CAN IDs, RTR messages, and data formats
-- `run.py`: Runner script to start components individually or together
 
 ### Support Files
 
@@ -62,56 +62,69 @@ make sim-off
 ### Recommended Usage
 
 ```bash
-# Option 1: Run both publisher and dashboard (most common use case)
-make run-app-pub
-
-# Option 2: Run complete system (publisher, data collector, dashboard)
+# Run complete system (broker, publisher, backend, dashboard)
 make run
 ```
 
 ### Individual Components
 
 ```bash
-# Start the publisher first (required for RTR controls to work)
+# Start the broker first (required by all other components)
+make run-broker
+
+# Start the publisher (required for RTR controls to work)
 make run-pub
 
 # Then run the dashboard in a separate terminal
-make run-app
+make run-dash
 
 # For data logging, run the backend
-make run-backend
-
-# Or use the run.py script:
-python run.py both        # Run both data collection and dashboard
-python run.py data        # Run only data collection
-python run.py dashboard   # Run only the dashboard
+make run-sub
 ```
 
-### Traditional Make Commands
+### Stopping Components
 
 ```bash
-# Create conda environment
-make mk-conda-env
+make kill-pub     # Kill publisher
+make kill-dash    # Kill dashboard
+make kill-sub     # Kill backend
+make kill-broker  # Kill broker
+make kill         # Kill everything
+```
 
-# Run the complete system (publisher, backend, and dashboard)
-make run
+## Connection Schema
 
-# Run just the publisher (for RTR requests)
-make run-pub
-
-# Run just the dashboard (after running the publisher)
-make run-app
-
-# Run both publisher and dashboard (most common use case)
-make run-app-pub
-
-# Run the data collection backend
-make run-backend
-
-# Kill specific components
-make kill-pub   # Kill publisher
-make kill-app   # Kill dashboard
-make kill       # Kill everything
+```mermaid
+graph TD
+    CAN["🔌 CAN Bus<br/>can0"]
+    
+    PUB["async_pub.py<br/>(Publisher)"]
+    BROKER["zmq_broker.py<br/>(Forwarder)"]
+    SUB["async_sub.py<br/>(Subscriber)"]
+    DASH["dashboard.py<br/>(Subscriber + Config)"]
+    SHARED["shared_data.py<br/>(In-process buffer)"]
+    
+    CAN <-->|socketcan| PUB
+    
+    PUB -->|PUB data :10111| BROKER
+    DASH -->|PUB config :10112| BROKER
+    
+    BROKER -->|SUB data :10101| SUB
+    BROKER -->|SUB data :10101| DASH
+    BROKER -->|SUB config :10102| PUB
+    
+    SUB -->|buffer| SHARED
+    SUB -->|write| CSV["CAN Data Log<br/>CSV"]
+    
+    DASH -->|read| SHARED
+    DASH -->|visualize| WEB["🌐 Dash/Plotly<br/>Web UI"]
+    
+    style BROKER fill:#ff9999
+    style CAN fill:#99ccff
+    style PUB fill:#99ff99
+    style SUB fill:#ffcc99
+    style DASH fill:#cc99ff
+    style WEB fill:#ffff99
 ```
 
 ## Architecture Benefits
@@ -122,7 +135,7 @@ make kill       # Kill everything
 - **Shared State**: Clean interface for data sharing between components
 - **Unified Backend**: `async_sub.py` serves as both a simple subscriber and full backend
 
-## ZMQ Broker (new)
+## ZMQ Broker
 
 To avoid bind/connect ordering issues and to fully decouple publishers and subscribers, this repository now includes a small ZMQ broker forwarder device:
 
@@ -147,6 +160,7 @@ python dashboard.py
 ```
 
 This broker is intentionally minimal (uses zmq.proxy) and runs with low overhead.
+
 ## Troubleshooting
 
 ### No Data in Dashboard
@@ -172,26 +186,17 @@ If the dashboard is not displaying data:
    If data reappears in both components after clearing, shared memory is working correctly.
 
 3. **Ensure Correct Order**:
-   - Start async_pub.py first
-   - Then start dashboard.py
+   - Start `zmq_broker.py` first
+   - Start `async_pub.py` next
+   - Then start `dashboard.py`
 
-4. **Direct Connection**:
-   The dashboard now attempts to connect directly to the data publisher,
-   which should resolve shared memory issues.
-
-5. **Check Logs**:
+4. **Check Logs**:
    Look for error messages in the console output of each component.
 
 ### RTR Frequency Controls Not Working
 
 - Only dashboard.py should bind to the config publisher port
 - Make sure async_pub.py is running and connected to the dashboard
-
-## Migration Notes
-
-- **`app.py` is deprecated**: Use `async_sub.py` instead for data collection
-- **Backward compatibility**: Old `app.py` has been moved to `app_deprecated.py` for reference
-- **Enhanced functionality**: `async_sub.py` now includes all backend features (data buffering, CSV logging, config publishing)
 
 ## Configuration
 

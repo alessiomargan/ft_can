@@ -5,7 +5,8 @@ ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 LOG_DIR="$ROOT_DIR/logs"
 RUN_DIR="$ROOT_DIR/run"
 mkdir -p "$LOG_DIR" "$RUN_DIR"
-CONDA_ACTIVATE="source $(conda info --base)/etc/profile.d/conda.sh && conda activate ft-can"
+CONDA_ENV_NAME=${CONDA_ENV_NAME:-ft-can}
+CONDA_RUN="conda run --no-capture-output --name ${CONDA_ENV_NAME}"
 
 # If FORCE=1 is set in the environment, ignore/remove existing pidfiles and start services anyway
 FORCE=${FORCE:-0}
@@ -32,7 +33,7 @@ start_service() {
     fi
   fi
   echo "Starting $name -> $logfile"
-  bash -c "$CONDA_ACTIVATE && nohup $cmd >> \"$logfile\" 2>&1 & echo \$! > \"$pidfile\""
+  bash -c "nohup $CONDA_RUN $cmd >> \"$logfile\" 2>&1 & echo \$! > \"$pidfile\""
 }
 
 # Start broker first
