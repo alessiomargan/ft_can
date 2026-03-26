@@ -94,14 +94,14 @@ run-dash: kill-dash  ## Run the CAN bus dashboard application only (run after ru
 	@echo "Starting CAN bus dashboard application..."
 	$(CONDA_RUN) python dashboard.py
 
-run-loader:  ## Run CAN bootloader host (usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 interface=socketcan BITRATE=250000])
+run-loader:  ## Run CAN bootloader host (usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 INTERFACE=socketcan BITRATE=250000 WINDOW_SIZE=16 ACK_INTERVAL=16 ACK_TIMEOUT=0.01])
 	@if [ -z "$(FILE)" ]; then \
 		echo "Error: FILE is required"; \
-		echo "Usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 INTERFACE=socketcan BITRATE=250000]"; \
+		echo "Usage: make run-loader FILE=path/to/fw.bin [SLOT=0 CHANNEL=can0 INTERFACE=socketcan BITRATE=250000 WINDOW_SIZE=16 ACK_INTERVAL=16 ACK_TIMEOUT=0.01]"; \
 		exit 1; \
 	fi
 	@echo "Running CAN loader for $(FILE)..."
-	$(CONDA_RUN) python can_loader.py "$(FILE)" --slot $${SLOT:-0} --channel $${CHANNEL:-can0} --interface $${INTERFACE:-socketcan} --bitrate $${BITRATE:-250000}
+	$(CONDA_RUN) python can_loader.py "$(FILE)" --slot $${SLOT:-0} --channel $${CHANNEL:-can0} --interface $${INTERFACE:-socketcan} --bitrate $${BITRATE:-250000} --window-size $${WINDOW_SIZE:-16} --ack-interval $${ACK_INTERVAL:-16} --ack-timeout $${ACK_TIMEOUT:-0.01}
 
 test:  ## Test the modular architecture
 	@echo "Testing modular architecture..."
